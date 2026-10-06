@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maika Namuo
+
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, LazyLock, RwLock},
+};
+
+crate::macros::choice_enum!(
+    #[derive(Hash)]
+    pub enum WindowKind {
+        Rectangular => "Rectangular",
+        Hann => "Hann",
+        Hamming => "Hamming",
+        Blackman => "Blackman",
+        BlackmanHarris => "Blackman-Harris",
+    }
+);
+
+impl WindowKind {
+    fn coefficients(self, len: usize) -> Vec<f32> {
+        if len <= 1 {
+            return vec![1.0; len];
+        }
+        let coeffs: &[f64] = match self {
+            Self::Rectangular => return vec![1.0; len],
+            Self::Hann => &[0.5, -0.5],
+            Self::Hamming => &[25.0 / 46.0, -21.0 / 46.0],
+            Self::Blackman => &[0.42, -0.5, 0.08],
+            Self::BlackmanHarris => &[0.35875, -0.48829, 0.14128, -0.01168],
+        };
+        let mut window = vec![0.0; len];
+        for n in 0..=len / 2 {
+            let phi = core::f64::consts::TAU * n as f64 / len as f64;
+            let value = coeffs
+                .iter()
+                .enumerate()
+                .fold(0.0, |sum, (k, &c)| c.mul_add((phi * k as f64).cos(), sum))
+                as f32;
+            window[n] = value;
+            window[(len - n) % len] = value;
+        }
+        window
+    }
+}
+
+type WindowCache = RwLock<HashMap<(WindowKind, usize), Arc<[f32]>>>;
+
+pub(crate) fn window_coefficients(kind: WindowKind, len: usize) -> Arc<[f32]> {
+    static CACHE: LazyLock<WindowCache> = LazyLock::new(Default::default);
+    crate::util::unpoison(CACHE.write())
+        .entry((kind, len))
+        .or_insert_with(|| Arc::from(kind.coefficients(len)))
+        .clone()
+}
+
+// Wider sums reduce DC-removal error.
+pub(crate) fn mean_f32(samples: &[f32]) -> f32 {
+    let (chunks, remainder) = samples.as_chunks::<4>();
+    let mut sums = [0.0_f64; 4];
+    for &[a, b, c, d] in chunks {
+        sums[0] += f64::from(a);
+        sums[1] += f64::from(b);
+        sums[2] += f64::from(c);
+        sums[3] += f64::from(d);
+    }
+    let sum = (sums[0] + sums[1])
+        + (sums[2] + sums[3])
+        + remainder
+            .iter()
+            .map(|&sample| f64::from(sample))
+            .sum::<f64>();
+    (sum / samples.len() as f64) as f32
+}
+
+pub fn copy_dc_removed_windowed_from_deque(dst: &mut [f32], src: &VecDeque<f32>, window: &[f32]) {
+    let len = dst.len();
+    let (head, tail) = src.as_slices();
+    let split = head.len().min(len);
+    dst[..split].copy_from_slice(&head[..split]);
+    dst[split..].copy_from_slice(&tail[..len - split]);
+    let mean = mean_f32(dst);
+    for (sample, &weight) in dst.iter_mut().zip(window) {
+        *sample = (*sample - mean) * weight;
+    }
+}
+
+pub fn compute_fft_bin_normalization(window: &[f32], fft_size: usize) -> Vec<f32> {
+    let bins = fft_size / 2 + 1;
+    let sum: f64 = window.iter().map(|&weight| f64::from(weight)).sum();
+    let dc_scale = sum.recip().powi(2) as f32;
+    let mut norms = vec![4.0 * dc_scale; bins];
+    norms[0] = dc_scale;
+    if fft_size.is_multiple_of(2) {
+        norms[bins - 1] = dc_scale;
+    }
+    norms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fft_window_math_is_precise_and_periodic() {
+        let samples = VecDeque::from(vec![0.1; 16_384]);
+        let mut output = vec![0.0; samples.len()];
+        copy_dc_removed_windowed_from_deque(&mut output, &samples, &vec![1.0; samples.len()]);
+        assert!(output.iter().all(|&sample| sample == 0.0));
+        let hann = WindowKind::Hann.coefficients(8);
+        assert_eq!(hann[1], hann[7]);
+        assert_eq!(hann[0], 0.0);
+        assert!((hann[4] - 1.0).abs() < 1.0e-6);
+        assert!((hann[7] - 0.146_446_5).abs() < 1.0e-6);
+    }
+}

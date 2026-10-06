@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maika Namuo
+
+const A440_HZ: f32 = 440.0;
+const A440_MIDI: i32 = 69;
+const SEMITONES_PER_OCTAVE: i32 = 12;
+const MIDI_OCTAVE_OFFSET: i32 = 1;
+
+const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MusicalNote {
+    pub midi_number: i32,
+}
+
+fn freq_to_midi(freq_hz: f32) -> Option<f32> {
+    let freq_hz = crate::util::finite_positive(freq_hz)?;
+    let m = A440_MIDI as f32 + SEMITONES_PER_OCTAVE as f32 * (freq_hz / A440_HZ).log2();
+    m.is_finite().then_some(m)
+}
+
+impl MusicalNote {
+    pub fn from_frequency(freq_hz: f32) -> Option<Self> {
+        freq_to_midi(freq_hz).map(|m| Self::from_midi(m.round() as i32))
+    }
+
+    pub fn from_midi(midi_number: i32) -> Self {
+        Self { midi_number }
+    }
+
+    fn name(self) -> &'static str {
+        NOTE_NAMES[self.midi_number.rem_euclid(SEMITONES_PER_OCTAVE) as usize]
+    }
+
+    pub fn octave(self) -> i32 {
+        self.midi_number.div_euclid(SEMITONES_PER_OCTAVE) - MIDI_OCTAVE_OFFSET
+    }
+
+    pub fn to_frequency(self) -> f32 {
+        A440_HZ * ((self.midi_number - A440_MIDI) as f32 / SEMITONES_PER_OCTAVE as f32).exp2()
+    }
+
+    pub fn is_black(self) -> bool {
+        self.name().len() == 2
+    }
+}
+
+impl std::fmt::Display for MusicalNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.name(), self.octave())
+    }
+}
+
+// Nearest note and cents deviation for a frequency.
+pub struct NoteInfo {
+    pub note: MusicalNote,
+    pub cents: i32,
+}
+
+impl NoteInfo {
+    pub fn from_frequency(freq_hz: f32) -> Option<Self> {
+        freq_to_midi(freq_hz).map(|midi| {
+            let rounded = midi.round() as i32;
+            let cents = ((midi - rounded as f32) * 100.0).round() as i32;
+            Self {
+                note: MusicalNote::from_midi(rounded),
+                cents,
+            }
+        })
+    }
+
+    // `"F4  + 42 Cents"`
+    pub fn fmt_note_cents(self) -> String {
+        let sign = if self.cents >= 0 { '+' } else { '-' };
+        format!("{:<4}{sign} {} Cents", self.note, self.cents.abs())
+    }
+}

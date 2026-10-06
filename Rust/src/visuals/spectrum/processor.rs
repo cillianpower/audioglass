@@ -1,0 +1,810 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maika Namuo
+
+use crate::dsp::AudioBlock;
+use crate::util::audio::{
+    Channel, DB_FLOOR, DEFAULT_SAMPLE_RATE, LN_TO_DB, MAX_DSP_BUFFER_LEN, WindowKind,
+    compute_fft_bin_normalization, copy_dc_removed_windowed_from_deque, db_to_power,
+    sanitize_negative_db, sanitize_sample_rate, window_coefficients,
+};
+use realfft::{RealFftPlanner, RealToComplex};
+use rustfft::num_complex::Complex32;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+// GUI ranges only.
+pub const MIN_SPECTRUM_EXP_FACTOR: f32 = 0.0;
+pub const MAX_SPECTRUM_EXP_FACTOR: f32 = 0.95;
+pub const MIN_SPECTRUM_PEAK_DECAY: f32 = 0.0;
+pub const MAX_SPECTRUM_PEAK_DECAY: f32 = 120.0;
+pub const MIN_SPECTRUM_DB_FLOOR: f32 = DB_FLOOR;
+pub const MAX_SPECTRUM_DB_FLOOR: f32 = -1.0;
+pub const DEFAULT_SPECTRUM_DB_FLOOR: f32 = -120.0;
+
+const DEFAULT_SPECTRUM_HOP_DIVISOR: usize = 16;
+const DEFAULT_SPECTRUM_FFT_SIZE: usize = 16_384;
+pub const DEFAULT_SPECTRUM_EXP_FACTOR: f32 = 0.5;
+pub const DEFAULT_SPECTRUM_PEAK_DECAY: f32 = 12.0;
+const TRACE_COUNT: usize = 2;
+const WEIGHTING_COUNT: usize = 2;
+
+pub type SpectrumTraceSnapshot = [Vec<f32>; WEIGHTING_COUNT];
+
+#[derive(Debug, Clone, Default)]
+pub struct SpectrumSnapshot {
+    // The floor used when these traces were captured.
+    pub floor_db: f32,
+    pub frequency_bins: Vec<f32>,
+    pub traces: [SpectrumTraceSnapshot; TRACE_COUNT],
+}
+
+crate::macros::default_struct! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct SpectrumConfig {
+        pub sample_rate: f32 = DEFAULT_SAMPLE_RATE,
+        pub fft_size: usize = DEFAULT_SPECTRUM_FFT_SIZE,
+        pub hop_size: usize = DEFAULT_SPECTRUM_FFT_SIZE / DEFAULT_SPECTRUM_HOP_DIVISOR,
+        pub window: WindowKind = WindowKind::Hann,
+        pub averaging: AveragingMode = AveragingMode::None,
+        pub source: Channel = Channel::Mid,
+        pub secondary_source: Channel = Channel::Side,
+        pub floor_db: f32 = DEFAULT_SPECTRUM_DB_FLOOR,
+    }
+}
+
+impl SpectrumConfig {
+    pub fn normalize(&mut self) {
+        self.sample_rate = sanitize_sample_rate(self.sample_rate);
+        self.fft_size = self.fft_size.clamp(1, MAX_DSP_BUFFER_LEN);
+        if self.hop_size == 0 {
+            self.hop_size = (self.fft_size / DEFAULT_SPECTRUM_HOP_DIVISOR).max(1);
+        }
+        self.floor_db = sanitize_negative_db(self.floor_db, DEFAULT_SPECTRUM_DB_FLOOR);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AveragingMode {
+    None,
+    // Power retention per FFT hop, after seeding.
+    Exponential { factor: f32 },
+    // dB per audio second, applied per FFT hop.
+    PeakHold { decay_per_second: f32 },
+}
+
+#[derive(Default)]
+pub struct SpectrumProcessor {
+    config: SpectrumConfig,
+    snapshot: SpectrumSnapshot,
+    planner: RealFftPlanner<f32>,
+    fft: Option<Arc<dyn RealToComplex<f32>>>,
+    window: Arc<[f32]>,
+    real_buffer: Vec<f32>,
+    spectrum_buffer: Vec<Complex32>,
+    scratch_buffer: Vec<Complex32>,
+    bin_normalization: Vec<f32>,
+    pcm_buffers: [VecDeque<f32>; TRACE_COUNT],
+    pending_skip_frames: usize,
+    levels: [SpectrumLevelBuffers; TRACE_COUNT],
+    a_weighting_db: Vec<f32>,
+}
+
+impl SpectrumProcessor {
+    pub fn new(mut config: SpectrumConfig) -> Self {
+        config.normalize();
+        Self {
+            config,
+            ..Self::default()
+        }
+    }
+
+    pub fn config(&self) -> SpectrumConfig {
+        self.config
+    }
+
+    pub(in crate::visuals) fn snapshot(&self) -> &SpectrumSnapshot {
+        &self.snapshot
+    }
+
+    pub fn reset_audio(&mut self) {
+        if self.fft.is_some() {
+            self.reset_level_buffers();
+        }
+        self.pcm_buffers.iter_mut().for_each(VecDeque::clear);
+        self.pending_skip_frames = 0;
+    }
+
+    pub(in crate::visuals) fn prepare(&mut self) {
+        if self.fft.is_none() {
+            self.rebuild_fft();
+        }
+    }
+
+    pub(in crate::visuals) fn has_buffered_signal(&self) -> bool {
+        self.pcm_buffers
+            .iter()
+            .flatten()
+            .any(|&sample| sample != 0.0)
+    }
+
+    fn rebuild_fft(&mut self) {
+        let fft_size = self.config.fft_size;
+        let fft = self.planner.plan_fft_forward(fft_size);
+        self.window = window_coefficients(self.config.window, fft_size);
+        self.real_buffer.resize(fft_size, 0.0);
+        self.spectrum_buffer = fft.make_output_vec();
+        self.scratch_buffer = fft.make_scratch_vec();
+        self.fft = Some(fft);
+        self.bin_normalization = compute_fft_bin_normalization(&self.window, fft_size);
+        self.reset_buffers();
+    }
+
+    fn reset_buffers(&mut self) {
+        let bins = self.config.fft_size / 2 + 1;
+        let bin_hz = self.config.sample_rate / self.config.fft_size as f32;
+        (self.snapshot.frequency_bins, self.a_weighting_db) = (0..bins)
+            .map(|bin| {
+                let frequency = bin as f32 * bin_hz;
+                (frequency, a_weight(frequency))
+            })
+            .unzip();
+        self.reset_level_buffers();
+        self.pcm_buffers.iter_mut().for_each(VecDeque::clear);
+        self.pending_skip_frames = 0;
+    }
+
+    fn reset_level_buffers(&mut self) {
+        let bins = self.config.fft_size / 2 + 1;
+        let floor = self.config.floor_db;
+        self.snapshot.floor_db = floor;
+        for db in self.snapshot.traces.iter_mut().flatten() {
+            reset_to_floor(db, bins, floor);
+        }
+        self.reset_smoothing();
+    }
+
+    fn reset_smoothing(&mut self) {
+        let bins = self.config.fft_size / 2 + 1;
+        let state_floor = smoothing_state_floor(&self.a_weighting_db, self.config.floor_db);
+        let active = self.active_traces();
+        let smoothing = !matches!(self.config.averaging, AveragingMode::None);
+        for (index, buffers) in self.levels.iter_mut().enumerate() {
+            if active[index] {
+                buffers.reset(bins, state_floor, smoothing);
+            } else {
+                *buffers = SpectrumLevelBuffers::default();
+            }
+        }
+    }
+
+    fn sources(&self) -> [Channel; TRACE_COUNT] {
+        [self.config.source, self.config.secondary_source]
+    }
+
+    fn active_traces(&self) -> [bool; TRACE_COUNT] {
+        let [primary, secondary] = self.sources();
+        [
+            primary != Channel::None,
+            secondary != Channel::None && secondary != primary,
+        ]
+    }
+
+    fn process_ready_windows(&mut self) -> bool {
+        let fft_size = self.config.fft_size;
+        let hop = self.config.hop_size;
+        let bins = fft_size / 2 + 1;
+        let floor = self.config.floor_db;
+        let dt_seconds = hop as f32 / self.config.sample_rate;
+        let active = self.active_traces();
+        let mut produced = false;
+
+        debug_assert_eq!(self.a_weighting_db.len(), bins);
+        if !active.iter().any(|&active| active) {
+            return false;
+        }
+
+        while (0..TRACE_COUNT)
+            .all(|trace| !active[trace] || self.pcm_buffers[trace].len() >= fft_size)
+        {
+            let mut drained = hop;
+            for (trace, &active) in active.iter().enumerate() {
+                if active {
+                    let count = self.process_trace_window(trace, dt_seconds, floor);
+                    drained = drained.min(count);
+                }
+            }
+            self.pending_skip_frames = self.pending_skip_frames.saturating_add(hop - drained);
+            produced = true;
+        }
+
+        if produced {
+            self.snapshot.floor_db = floor;
+        }
+        produced
+    }
+
+    fn process_trace_window(&mut self, trace: usize, dt_seconds: f32, floor: f32) -> usize {
+        copy_dc_removed_windowed_from_deque(
+            &mut self.real_buffer,
+            &self.pcm_buffers[trace],
+            &self.window,
+        );
+        self.fft
+            .as_ref()
+            .expect("spectrum FFT")
+            .process_with_scratch(
+                &mut self.real_buffer,
+                &mut self.spectrum_buffer,
+                &mut self.scratch_buffer,
+            )
+            .expect("internally sized spectrum FFT buffers");
+
+        let level = &mut self.levels[trace];
+        let snapshot = &mut self.snapshot.traces[trace];
+        let powers = &mut self.real_buffer[..self.spectrum_buffer.len()];
+        for ((power, complex), norm) in powers
+            .iter_mut()
+            .zip(&self.spectrum_buffer)
+            .zip(&self.bin_normalization)
+        {
+            let re = f64::from(complex.re);
+            let im = f64::from(complex.im);
+            let normalized = (re * re + im * im) * f64::from(*norm);
+            // Saturate overflow and invalid FFT bins before they can poison smoothing.
+            *power = normalized.min(f64::from(f32::MAX)) as f32;
+        }
+        level.update_outputs(
+            self.config.averaging,
+            powers,
+            snapshot,
+            &self.a_weighting_db,
+            dt_seconds,
+            floor,
+        );
+        let buf = &mut self.pcm_buffers[trace];
+        let count = self.config.hop_size.min(buf.len());
+        buf.drain(..count);
+        count
+    }
+
+    pub fn process_block(&mut self, block: &AudioBlock<'_>) -> Option<&SpectrumSnapshot> {
+        if block.sample_rate != self.config.sample_rate {
+            self.config.sample_rate = block.sample_rate;
+            if self.fft.is_some() {
+                self.reset_buffers();
+            }
+        }
+
+        self.prepare();
+        self.push_sources(block);
+
+        self.process_ready_windows().then_some(&self.snapshot)
+    }
+
+    fn push_sources(&mut self, block: &AudioBlock<'_>) {
+        let frames = block.frame_count();
+        let skip = self.pending_skip_frames.min(frames);
+        self.pending_skip_frames -= skip;
+        if skip == frames {
+            return;
+        }
+
+        let [primary_source, secondary_source] = self.sources();
+        let active = self.active_traces();
+        let [primary, secondary] = self.pcm_buffers.each_mut();
+        match active {
+            [true, true] => {
+                let remaining = frames - skip;
+                primary.reserve(remaining);
+                secondary.reserve(remaining);
+                for stereo in block.stereo_frames().skip(skip) {
+                    primary.push_back(primary_source.project(stereo));
+                    secondary.push_back(secondary_source.project(stereo));
+                }
+            }
+            [true, false] => primary.extend(block.projected_frames(primary_source).skip(skip)),
+            [false, true] => {
+                secondary.extend(block.projected_frames(secondary_source).skip(skip));
+            }
+            [false, false] => {}
+        }
+    }
+
+    pub fn update_config(&mut self, mut config: SpectrumConfig) {
+        let old = self.config;
+        config.normalize();
+        self.config = config;
+        if self.fft.is_none() {
+            return;
+        }
+        let averaging_mode_changed =
+            std::mem::discriminant(&old.averaging) != std::mem::discriminant(&config.averaging);
+        if old.fft_size != config.fft_size || old.window != config.window {
+            self.rebuild_fft();
+        } else if old.sample_rate != config.sample_rate
+            || old.hop_size != config.hop_size
+            || old.source != config.source
+            || old.secondary_source != config.secondary_source
+        {
+            self.reset_buffers();
+        } else if averaging_mode_changed {
+            self.reset_level_buffers();
+        } else if old.floor_db != config.floor_db {
+            self.reset_smoothing();
+        }
+    }
+}
+
+#[derive(Default)]
+struct SpectrumLevelBuffers {
+    smoothed_power: Vec<f32>,
+    state_floor: f32,
+}
+
+fn smoothing_state_floor(weighting_db: &[f32], floor: f32) -> f32 {
+    // Positive weighting can lift raw power from below the floor into view.
+    let headroom_db = weighting_db.iter().copied().fold(0.0_f32, f32::max);
+    db_to_power(floor - headroom_db).max(f32::MIN_POSITIVE)
+}
+
+impl SpectrumLevelBuffers {
+    fn reset(&mut self, bins: usize, state_floor: f32, smoothing: bool) {
+        self.state_floor = state_floor;
+        if smoothing {
+            reset_to_floor(&mut self.smoothed_power, bins, 0.0);
+        } else {
+            self.smoothed_power = Vec::new();
+        }
+    }
+
+    fn update_outputs(
+        &mut self,
+        mode: AveragingMode,
+        powers: &[f32],
+        outputs: &mut [Vec<f32>; WEIGHTING_COUNT],
+        weighting_db: &[f32],
+        dt_seconds: f32,
+        floor: f32,
+    ) {
+        debug_assert!(outputs.iter().all(|output| output.len() == powers.len()));
+        debug_assert_eq!(weighting_db.len(), powers.len());
+        let powers = match mode {
+            AveragingMode::None => powers,
+            AveragingMode::Exponential { factor } => {
+                let alpha = factor.clamp(0.0, 0.9999);
+                for (avg, &power) in self.smoothed_power.iter_mut().zip(powers) {
+                    *avg = if *avg <= 0.0 {
+                        power
+                    } else {
+                        *avg * alpha + power * (1.0 - alpha)
+                    };
+                    if *avg < self.state_floor {
+                        *avg = 0.0;
+                    }
+                }
+                &self.smoothed_power
+            }
+            AveragingMode::PeakHold { decay_per_second } => {
+                let decay = db_to_power(-decay_per_second.max(0.0) * dt_seconds);
+                for (hold, &power) in self.smoothed_power.iter_mut().zip(powers) {
+                    *hold = (*hold * decay).max(power);
+                    if *hold < self.state_floor {
+                        *hold = 0.0;
+                    }
+                }
+                &self.smoothed_power
+            }
+        };
+        let [weighted_out, raw_out] = outputs;
+        let bins = powers
+            .iter()
+            .zip(weighting_db)
+            .zip(raw_out)
+            .zip(weighted_out);
+        for (((&power, &weight), raw), weighted) in bins {
+            if power < self.state_floor {
+                (*raw, *weighted) = (floor, floor);
+                continue;
+            }
+            let db = power.ln() * LN_TO_DB;
+            *raw = db.max(floor);
+            *weighted = (db + weight).max(floor);
+        }
+    }
+}
+
+fn reset_to_floor(buf: &mut Vec<f32>, bins: usize, floor: f32) {
+    buf.clear();
+    buf.resize(bins, floor);
+}
+
+fn a_weight(freq_hz: f32) -> f32 {
+    const C1: f64 = 20.598_997 * 20.598_997;
+    const C2: f64 = 107.652_65 * 107.652_65;
+    const C3: f64 = 737.862_23 * 737.862_23;
+    const C4: f64 = 12_194.217 * 12_194.217;
+
+    if freq_hz <= 0.0 {
+        return f32::NEG_INFINITY;
+    }
+
+    let f = freq_hz as f64;
+    let f2 = f * f;
+    let numerator = C4 * f2 * f2;
+    let denom = (f2 + C1) * ((f2 + C2) * (f2 + C3)).sqrt() * (f2 + C4);
+
+    let ra = numerator / denom;
+    (20.0 * ra.log10() + 2.0) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::audio::sine_wave;
+
+    #[test]
+    fn normalization_bounds_runtime_values_without_enforcing_gui_ranges() {
+        let mut invalid = SpectrumConfig {
+            sample_rate: f32::NAN,
+            fft_size: usize::MAX,
+            hop_size: 0,
+            floor_db: f32::INFINITY,
+            ..Default::default()
+        };
+        invalid.normalize();
+        assert_eq!(invalid.sample_rate, DEFAULT_SAMPLE_RATE);
+        assert_eq!(invalid.fft_size, MAX_DSP_BUFFER_LEN);
+        assert_eq!(
+            invalid.hop_size,
+            MAX_DSP_BUFFER_LEN / DEFAULT_SPECTRUM_HOP_DIVISOR
+        );
+        assert_eq!(invalid.floor_db, DEFAULT_SPECTRUM_DB_FLOOR);
+
+        for (floor_db, expected) in [
+            (1.0, DEFAULT_SPECTRUM_DB_FLOOR),
+            (MIN_SPECTRUM_DB_FLOOR * 2.0, MIN_SPECTRUM_DB_FLOOR * 2.0),
+        ] {
+            let mut config = SpectrumConfig {
+                floor_db,
+                ..Default::default()
+            };
+            config.normalize();
+            assert_eq!(config.floor_db, expected);
+        }
+    }
+
+    #[test]
+    fn config_changes_preserve_snapshots_and_rebuild_fft_only_when_needed() {
+        let mut processor = SpectrumProcessor::new(SpectrumConfig {
+            fft_size: 128,
+            hop_size: 128,
+            floor_db: -1.0,
+            secondary_source: Channel::None,
+            ..Default::default()
+        });
+        processor.prepare();
+        for resize in [false, true] {
+            processor.pcm_buffers[0].extend([0.25, -0.25]);
+            let previous = processor.snapshot.clone();
+            let mut config = processor.config();
+            if resize {
+                config.fft_size *= 2;
+                config.hop_size *= 2;
+            } else {
+                config.floor_db = config.floor_db.next_up();
+            }
+            processor.update_config(config);
+            assert_eq!(processor.pcm_buffers[0].len(), if resize { 0 } else { 2 });
+            let bins = config.fft_size / 2 + 1;
+            if resize {
+                assert_eq!(processor.snapshot.floor_db, config.floor_db);
+                assert!(
+                    processor
+                        .snapshot
+                        .traces
+                        .iter()
+                        .flatten()
+                        .all(|trace| trace.len() == bins
+                            && trace.iter().all(|&db| db == config.floor_db))
+                );
+            } else {
+                assert_eq!(processor.snapshot.floor_db, previous.floor_db);
+                assert_eq!(processor.snapshot.frequency_bins, previous.frequency_bins);
+                assert_eq!(processor.snapshot.traces, previous.traces);
+            }
+            assert_eq!(
+                processor.levels[0].state_floor,
+                smoothing_state_floor(&processor.a_weighting_db, config.floor_db),
+            );
+            assert!(
+                processor
+                    .levels
+                    .iter()
+                    .all(|level| level.smoothed_power.is_empty())
+            );
+            let snapshot = processor
+                .process_block(&AudioBlock::new(
+                    &vec![0.0; config.fft_size],
+                    1,
+                    config.sample_rate,
+                ))
+                .unwrap();
+            assert_eq!(snapshot.frequency_bins.len(), bins);
+            assert_eq!(snapshot.floor_db, config.floor_db);
+            assert!(
+                snapshot
+                    .traces
+                    .iter()
+                    .flatten()
+                    .all(|trace| trace.len() == bins)
+            );
+        }
+    }
+
+    #[test]
+    fn configured_sources_drive_their_fft_traces() {
+        let sample_rate = 8.0;
+        let samples: Vec<_> = sine_wave(1.0, sample_rate, 8, 1.0)
+            .into_iter()
+            .zip(sine_wave(2.0, sample_rate, 8, 1.0))
+            .flat_map(|(left, side)| [left, left - 2.0 * side])
+            .collect();
+
+        for (source, expected_bins) in [
+            (Channel::Left, [Some(1), Some(2)]),
+            (Channel::None, [None, Some(2)]),
+        ] {
+            let config = SpectrumConfig {
+                sample_rate,
+                fft_size: 8,
+                hop_size: 8,
+                window: WindowKind::Rectangular,
+                source,
+                secondary_source: Channel::Side,
+                ..Default::default()
+            };
+            let mut processor = SpectrumProcessor::new(config);
+            let snapshot = processor
+                .process_block(&AudioBlock::new(&samples, 2, sample_rate))
+                .expect("expected spectrum");
+
+            for (trace, expected_bin) in snapshot.traces.iter().zip(expected_bins) {
+                assert_eq!(trace[1].len(), 5);
+                for (bin, &actual) in trace[1].iter().enumerate() {
+                    let expected = if Some(bin) == expected_bin {
+                        0.0
+                    } else {
+                        config.floor_db
+                    };
+                    assert!(
+                        actual == expected
+                            || expected_bin.is_some() && (actual - expected).abs() < 0.01,
+                        "{source:?}, bin {bin}: {actual} vs {expected} dBFS"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn averaging_follows_each_audio_hop_and_resets_on_mode_changes() {
+        use AveragingMode::*;
+        let mut processor = SpectrumProcessor::new(SpectrumConfig {
+            sample_rate: 8.0,
+            fft_size: 8,
+            hop_size: 8,
+            window: WindowKind::Rectangular,
+            floor_db: -100.0,
+            ..Default::default()
+        });
+        let samples: Vec<_> = [1.0, 0.0, 0.5, 0.0]
+            .into_iter()
+            .flat_map(|amplitude| sine_wave(1.0, 8.0, 8, amplitude))
+            .collect();
+        for (mode, powers) in [
+            (
+                PeakHold {
+                    decay_per_second: 24.0,
+                },
+                [1.0, 0.0039810717, 0.25, 0.0009952679],
+            ),
+            (Exponential { factor: 0.5 }, [1.0, 0.5, 0.375, 0.1875]),
+            (None, [1.0, 0.0, 0.25, 0.0]),
+            (Exponential { factor: 0.75 }, [1.0, 0.75, 0.625, 0.46875]),
+        ] {
+            processor.update_config(SpectrumConfig {
+                averaging: mode,
+                ..processor.config()
+            });
+            let reset = processor
+                .process_block(&AudioBlock::new(&[0.0; 8], 1, 8.0))
+                .unwrap();
+            assert_eq!(reset.traces[0][1][1], -100.0, "mode change to {mode:?}");
+            for hops in [1, 4] {
+                processor.reset_audio();
+                for (chunk, expected) in samples.chunks(hops * 8).zip(powers.chunks(hops)) {
+                    let snapshot = processor
+                        .process_block(&AudioBlock::new(chunk, 1, 8.0))
+                        .unwrap();
+                    let expected = (10.0 * f32::log10(*expected.last().unwrap())).max(-100.0);
+                    let actual = snapshot.traces[0][1][1];
+                    assert!(
+                        (actual - expected).abs() < 1.0e-5,
+                        "{mode:?}, {hops} hops: {actual} vs {expected} dB"
+                    );
+                }
+            }
+            processor.process_block(&AudioBlock::new(&samples[..8], 1, 8.0));
+        }
+    }
+
+    #[test]
+    fn overrange_power_is_finite_and_recovers() {
+        for averaging in [
+            AveragingMode::None,
+            AveragingMode::Exponential { factor: 0.0 },
+            AveragingMode::Exponential { factor: 0.5 },
+            AveragingMode::PeakHold {
+                decay_per_second: 1000.0,
+            },
+        ] {
+            for amplitude in [1.0e18, 1.0e20, f32::MAX] {
+                let config = SpectrumConfig {
+                    fft_size: 128,
+                    hop_size: 128,
+                    window: WindowKind::Rectangular,
+                    source: Channel::Left,
+                    secondary_source: Channel::Right,
+                    averaging,
+                    ..Default::default()
+                };
+                let mut processor = SpectrumProcessor::new(config);
+                let burst = [amplitude, amplitude, -amplitude, -amplitude].repeat(32);
+                let expected_power = 2.0 * f64::from(amplitude).powi(2);
+                for _ in 0..2 {
+                    let snapshot = processor
+                        .process_block(&AudioBlock::new(&burst, 1, config.sample_rate))
+                        .unwrap();
+                    assert!(
+                        snapshot
+                            .traces
+                            .iter()
+                            .flatten()
+                            .flatten()
+                            .all(|db| db.is_finite()),
+                        "{averaging:?}, amplitude {amplitude}: non-finite levels"
+                    );
+                    if expected_power <= f64::from(f32::MAX) {
+                        let expected = (10.0 * expected_power.log10()) as f32;
+                        for trace in &snapshot.traces {
+                            let actual = trace[1][32];
+                            assert!(
+                                (actual - expected).abs() < 1.0e-4,
+                                "{averaging:?}, amplitude {amplitude}: {actual} vs {expected} dB"
+                            );
+                        }
+                    }
+                }
+                let silence = vec![0.0; config.hop_size * 500];
+                let snapshot = processor
+                    .process_block(&AudioBlock::new(&silence, 1, config.sample_rate))
+                    .unwrap();
+                assert!(
+                    snapshot
+                        .traces
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .all(|&db| db == config.floor_db),
+                    "{averaging:?}, amplitude {amplitude}: failed to return to the floor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hops_larger_than_the_fft_are_block_partition_independent() {
+        for (channels, source, secondary_source) in [
+            (1, Channel::Left, Channel::Side),
+            (2, Channel::Left, Channel::Right),
+            (2, Channel::None, Channel::Right),
+            (2, Channel::Left, Channel::None),
+            (2, Channel::Left, Channel::Left),
+        ] {
+            let samples: Vec<_> = (0..29)
+                .flat_map(|i| {
+                    [(i as f32 * 0.73).sin(), (i as f32 * 0.37).cos()]
+                        .into_iter()
+                        .take(channels)
+                })
+                .collect();
+            let config = SpectrumConfig {
+                sample_rate: 32.0,
+                fft_size: 8,
+                hop_size: 16,
+                window: WindowKind::Rectangular,
+                source,
+                secondary_source,
+                ..Default::default()
+            };
+            let mut whole_processor = SpectrumProcessor::new(config);
+            let whole = whole_processor
+                .process_block(&AudioBlock::new(&samples, channels, 32.0))
+                .unwrap();
+
+            let mut partitioned_processor = SpectrumProcessor::new(config);
+            let mut partitioned = None;
+            for chunk in samples.chunks(channels * 8) {
+                partitioned = partitioned_processor
+                    .process_block(&AudioBlock::new(chunk, channels, 32.0))
+                    .cloned()
+                    .or(partitioned);
+            }
+            let partitioned = partitioned.unwrap();
+
+            assert_eq!(
+                whole.traces, partitioned.traces,
+                "{source:?}/{secondary_source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_keeps_only_power_visible_after_weighting() {
+        for mode in [
+            AveragingMode::Exponential { factor: 0.95 },
+            AveragingMode::PeakHold {
+                decay_per_second: 12.0,
+            },
+        ] {
+            let mut buffers = SpectrumLevelBuffers::default();
+            buffers.reset(2, smoothing_state_floor(&[0.0, 1.2], -100.0), true);
+            buffers.smoothed_power[0] = db_to_power(-101.0);
+            let mut outputs = [vec![-100.0; 2], vec![-100.0; 2]];
+            buffers.update_outputs(
+                mode,
+                &[0.0, db_to_power(-100.5)],
+                &mut outputs,
+                &[0.0, 1.2],
+                1.0,
+                -100.0,
+            );
+            assert_eq!(buffers.smoothed_power[0], 0.0);
+            assert_eq!(outputs[1], [-100.0; 2]);
+            assert_eq!(outputs[0][0], -100.0);
+            assert!(
+                (outputs[0][1] + 99.3).abs() < 1.0e-5,
+                "{mode:?}: {outputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_weight_matches_iec_reference_points() {
+        let reference_points: &[(f32, f32)] = &[
+            (1.0, -148.6),
+            (5.0, -93.1),
+            (31.5, -39.4),
+            (63.0, -26.2),
+            (100.0, -19.1),
+            (200.0, -10.9),
+            (500.0, -3.2),
+            (1000.0, 0.0),
+            (2000.0, 1.2),
+            (4000.0, 1.0),
+            (8000.0, -1.1),
+            (16000.0, -6.6),
+        ];
+
+        for &(freq, expected_db) in reference_points {
+            let actual = a_weight(freq);
+            let delta = (actual - expected_db).abs();
+            assert!(
+                delta <= 0.15,
+                "A-weight mismatch at {freq} Hz: expected {expected_db} dB, got {actual} dB (delta={delta})"
+            );
+        }
+    }
+}
