@@ -49,7 +49,7 @@ final class SpectrogramView: MTKView {
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
 
     func update(_ pixels: [UInt8]) {
         guard pixels.count == 512 * 192, let device,

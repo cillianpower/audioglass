@@ -2,6 +2,28 @@
 
 Updated 2026-10-07. Continued the 2026-10-02 handover: live capture, all six upstream meters, native controls/persistence, bounded transport, and a native Metal spectrogram now exist. Full OpenMeters/MiniMeters feature parity is **not complete**; [FEATURES.md](FEATURES.md) is the detailed gap list.
 
+## 2026-10-08 rendering and normalization update
+
+- Visible rendering/analysis uses `NSWindow.displayLink` with a preferred rate of 60 or 120 fps, selected through Settings → Frame Rate and persisted via `FrameRate` (default 120). Changes apply immediately. The actual cadence depends on display refresh, system scheduling, and rendering cost; sustained 120 fps throughput has not been measured. A 30 Hz background timer only runs while occluded/hidden/minimized to keep capture/history current. Worker snapshots are presented on display ticks; only one analysis job may be in flight.
+- Independent Oscilloscope, Waveform, and Stereometer Normalization controls appear in native Settings and the View menu. Enabled by default, persisted via `NormalizeScope`, `NormalizeWaveform`, `NormalizeStereo`. Scaling affects drawings only, not raw hover amplitudes, level meters or correlation. Waveform shares gain across the entire visible stereo history; stereometer uses shared radial gain to preserve stereo balance.
+- `DisplayNormalization.swift`: 95% peak fit, immediate gain reduction for louder peaks, 250 ms release for gain increases, silence reset and amplification floor at −80 dBFS. Scope hover marker uses the same display gain as its trace.
+- `PixelTrace.swift`: FFT and scope drawing retains ordered min/max extrema per physical pixel column to bound path segments at high frame rates. Full analysis snapshots remain available for hover readouts.
+- Build passed. Live quiet audio visually filled normalized scope/waveform/stereo views; their NORM labels were visible. No sustained FPS benchmark or calibrated normalization test has been run.
+
+## 2026-10-08 interface update
+
+- Native **Audioglass → Settings… (⌘,)** opens a separate settings window. The front-facing Settings button and full-width info header are removed.
+- Loudness is pinned in the left column with source, sample rate, and capture status; it can still be hidden. Interactive meters occupy the full height to its right. The slim top area handles window dragging; meter bodies do not move the window.
+- Settings exposes module visibility, persisted Move Up/Down ordering for the five interactive meters, layout, FFT smoothing and existing analysis controls. Loudness stays pinned independently of ordering. `MeterOrder` persists all interactive modules, including hidden ones.
+- Shift-drag dividers resizes adjacent interactive meters; separate horizontal/vertical size weights persist. Click-and-hold spectrum freezes trace and readouts while other analysis continues; release/deactivation clears the hold.
+- `MeterSettingsWindow.swift` implements the native controls, dispatching to the same menu actions to keep settings synchronized.
+- Build succeeded. Native UI confirmed ⌘, opens Settings, reordering both directions, smoothing selection and restoration, and the compact main layout. Original module order and smoothing Off restored. Full sustained-hold/Shift-drag coverage remains unverified.
+- A native CoreText exception occurred in the existing meter label drawing during the first reorder check. Meter/sidebar labels now use Menlo rather than the variable system monospace font. Repeated ordering/smoothing checks then completed without a crash; this is limited validation, not a long-duration stability result.
+
+## Repository
+
+Private repository: https://github.com/cillianpower/audioglass-private (`private` remote). The earlier private `cillianpower/audioglass` repository remains configured as `origin`. The current branch tracks `private/main`. Build artifacts remain ignored.
+
 ## Product direction and authorization
 
 The user approved the existing glass direction. Preserve ordinary macOS window behavior, full-size glass beneath native traffic lights, hidden title/no separate titlebar, normal window level, white thin straight trace segments, spectrum smoothing Off by default, and horizontal/vertical/automatic layouts. This should become a native glass alternative with OpenMeters/MiniMeters feature completeness.
@@ -33,7 +55,7 @@ Native controls:
 
 Source, visibility, layout, analysis settings, and frame persist. CAPTURING means HAL callbacks are advancing (possibly silence), **not proof of consent or audible signal**. WAITING FOR STREAM means callbacks have not advanced since the last control poll. Tap/default output/format changes are polled each second and restart capture. Error messages point to system audio permissions; microphone consent failures need appropriate input messaging improvements.
 
-Bundle: `build/Audioglass.app`, ID `com.cillianpower.audioglass.study` retained for window/preferences/permission continuity, version 0.2.0. Locally/ad-hoc signed, macOS 26+. Not a Git repository yet. `.gitignore` now excludes build outputs and Rust target files.
+Bundle: `build/Audioglass.app`, ID `com.cillianpower.audioglass.study` retained for window/preferences/permission continuity, version 0.2.0. Locally/ad-hoc signed, macOS 26+. Source is tracked in Git. `.gitignore` now excludes build outputs and Rust target files.
 
 ## Validation
 

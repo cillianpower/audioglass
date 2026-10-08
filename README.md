@@ -4,6 +4,15 @@ Audioglass is an actively developed native macOS audio meter app, pairing a tran
 
 The interface adapts its meter layout to the window shape and includes cursor readouts for inspecting audio. Analysis runs locally; this version does not record or transmit audio.
 
+## Controls
+
+- Hold **Shift** and drag the divider between meters to resize adjacent sections. Horizontal and vertical sizes are saved separately; small windows scroll to keep meters readable.
+- Open **Audioglass → Settings…** or press **⌘,** to toggle modules, reorder the interactive meters, and configure FFT smoothing and analysis. At least one stays visible. **Reset Section Sizes** restores equal sizing.
+- Choose **60 or 120 fps** in **Settings → Frame Rate**. The display-synchronized rate is saved, defaults to 120 fps, and is limited by your display’s refresh rate.
+- In Settings, independently toggle **Oscilloscope / Waveform / Stereometer Normalization** (on by default). Quiet audio expands to fit the view; level readouts and correlation use the original audio.
+- Click and hold the **Spectrum** to freeze its trace and cursor readings; release to resume. Other meters continue updating.
+- Loudness and audio information stay in the left column; interactive meters use the full height to its right. Drag the slim **top bar** to move the window.
+
 ## Build
 
 Requires macOS 26+, Swift 6.2+, and Rust 1.94+.

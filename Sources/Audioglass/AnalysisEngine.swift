@@ -1,13 +1,18 @@
 import Foundation
 
 struct MeterSettings: Sendable {
+    var frameRate = UserDefaults.standard.object(forKey: "FrameRate") as? Int ?? 120
     var channel = UserDefaults.standard.integer(forKey: "AnalysisChannel")
     var fftSize = UserDefaults.standard.object(forKey: "FFTSize") as? Int ?? 16384
     var weighted = UserDefaults.standard.bool(forKey: "AWeighting")
     var floor = UserDefaults.standard.object(forKey: "SpectrumFloor") as? Int ?? -120
     var cycles = UserDefaults.standard.object(forKey: "ScopeCycles") as? Int ?? 2
     var waveSpeed = UserDefaults.standard.object(forKey: "WaveSpeed") as? Int ?? 200
+    var normalizeScope = UserDefaults.standard.object(forKey: "NormalizeScope") as? Bool ?? true
+    var normalizeWaveform = UserDefaults.standard.object(forKey: "NormalizeWaveform") as? Bool ?? true
+    var normalizeStereo = UserDefaults.standard.object(forKey: "NormalizeStereo") as? Bool ?? true
     init() {
+        if ![60, 120].contains(frameRate) { frameRate = 120 }
         if !(0...3).contains(channel) { channel = 0 }
         if ![4096, 8192, 16384, 32768].contains(fftSize) { fftSize = 16384 }
         if ![-60, -90, -120].contains(floor) { floor = -120 }
