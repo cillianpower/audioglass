@@ -50,13 +50,15 @@ final class MeterSettingsWindow: NSWindowController {
         }
         form.addSubview(layout)
         nextY += 34
-        for item in controlsMenu.items where item.submenu != nil && item.title != "Meters" {
-            guard let submenu = item.submenu else { continue }
-            label(item.title, y: nextY + 4)
-            let popup = NSPopUpButton(frame: NSRect(x: 250, y: nextY, width: 280, height: 26))
-            for option in submenu.items { addOption(option, to: popup) }
-            form.addSubview(popup)
-            nextY += 34
+        // Submenus of option menus (e.g. Spectrogram) become their own sections.
+        let groups = controlsMenu.items.filter { $0.submenu?.items.contains { $0.submenu != nil } == true }
+        for item in controlsMenu.items where item.submenu != nil && item.title != "Meters" && !groups.contains(item) {
+            popup(item)
+        }
+        for group in groups {
+            nextY += 12
+            heading(group.title)
+            for item in group.submenu?.items ?? [] where item.submenu != nil { popup(item) }
         }
         nextY += 10
         for title in ["Reset Section Sizes", "Reset Analysis"] {
@@ -74,6 +76,14 @@ final class MeterSettingsWindow: NSWindowController {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
+    private func popup(_ item: NSMenuItem) {
+        guard let submenu = item.submenu else { return }
+        label(item.title, y: nextY + 4)
+        let popup = NSPopUpButton(frame: NSRect(x: 250, y: nextY, width: 280, height: 26))
+        for option in submenu.items { addOption(option, to: popup) }
+        form.addSubview(popup)
+        nextY += 34
+    }
     private func heading(_ title: String) {
         let heading = NSTextField(labelWithString: title)
         heading.font = .boldSystemFont(ofSize: 14)
