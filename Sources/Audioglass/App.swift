@@ -411,6 +411,7 @@ final class MeterView: NSView {
     }()
     let spectrogramView = SpectrogramView()
     var layoutColumns = 6
+    var layoutHorizontal = true
     var arrangement = UserDefaults.standard.integer(forKey: "StripLayoutMode")
     var smoothingLabel = "OFF" { didSet { headerChanged?() } }
     var frameData = AnalysisFrame(frequencies: [], levels: [], waveform: []) {
@@ -466,7 +467,7 @@ final class MeterView: NSView {
     private var horizontalWeights = MeterView.loadWeights("HorizontalMeterWeights")
     private var verticalWeights = MeterView.loadWeights("VerticalMeterWeights")
     private var resizeDrag: (index: Int, start: CGFloat, first: CGFloat, second: CGFloat)?
-    private var horizontal: Bool { layoutColumns > 1 }
+    private var horizontal: Bool { layoutHorizontal }
     private var minimumExtent: CGFloat { horizontal ? 150 : 110 }
     private var hoverPoint: NSPoint?
     private var graphs: [Int: NSRect] = [:]
@@ -489,7 +490,7 @@ final class MeterView: NSView {
     override func mouseDown(with event: NSEvent) {
         mouseMoved(with: event)
         let point = convert(event.locationInWindow, from: nil)
-        if point.y < 24 && !event.modifierFlags.contains(.shift) {
+        if !horizontal && point.y < 24 && !event.modifierFlags.contains(.shift) {
             window?.performDrag(with: event)
             return
         }
@@ -527,7 +528,7 @@ final class MeterView: NSView {
     }
 
     private func panelRects() -> [NSRect] {
-        let area = bounds.insetBy(dx: 8, dy: 7)
+        let area = bounds.insetBy(dx: 8, dy: horizontal ? 3 : 7)
         guard !displayMeters.isEmpty else { return [] }
         let weights = horizontal ? horizontalWeights : verticalWeights
         let total = displayMeters.reduce(CGFloat.zero) { $0 + weights[$1] }
@@ -630,15 +631,14 @@ final class MeterView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func draw(_ dirtyRect: NSRect) {
-        let area = bounds.insetBy(dx: 8, dy: 7)
+        let area = bounds.insetBy(dx: 8, dy: horizontal ? 3 : 7)
         guard area.width > 0, area.height > 40 else { return }
         let rects = panelRects()
         graphs.removeAll(keepingCapacity: true)
         spectrogramView.isHidden = !visibleMeters.contains(2)
         for (position, meter) in displayMeters.enumerated() {
             let rect = rects[position]
-            let normalized = (meter == 1 && settings.normalizeScope) || (meter == 3 && settings.normalizeWaveform) || (meter == 4 && settings.normalizeStereo)
-            panel(Self.meterNames[meter] + (meter == 0 && frozenSpectrum != nil ? " · HELD" : normalized ? " · NORM" : ""), rect: rect) { graph in
+            panel(meter, rect: rect) { graph in
                 graphs[meter] = graph
                 switch meter {
                 case 0: spectrum(in: graph)
@@ -668,9 +668,19 @@ final class MeterView: NSView {
         hoverOverlay.needsDisplay = true
     }
 
-    private func panel(_ name: String, rect: NSRect, draw: (NSRect) -> Void) {
-        text(name, at: NSPoint(x: rect.minX + 4, y: rect.minY + 2), size: 9, color: .white.withAlphaComponent(0.55))
-        let graph = NSRect(x: rect.minX + 4, y: rect.minY + 20, width: rect.width - 8, height: rect.height - 36)
+    private func meterTitle(_ meter: Int) -> String {
+        let normalized = (meter == 1 && settings.normalizeScope) || (meter == 3 && settings.normalizeWaveform) || (meter == 4 && settings.normalizeStereo)
+        return Self.meterNames[meter] + (meter == 0 && frozenSpectrum != nil ? " · HELD" : normalized ? " · NORM" : "")
+    }
+
+    private func panel(_ meter: Int, rect: NSRect, draw: (NSRect) -> Void) {
+        if !horizontal {
+            text(meterTitle(meter), at: NSPoint(x: rect.minX + 4, y: rect.minY + 2), size: 9, color: .white.withAlphaComponent(0.55))
+        }
+        // Only the spectrum needs a footer for its frequency axis in the strip.
+        let top: CGFloat = horizontal ? 0 : 20
+        let bottom: CGFloat = horizontal && meter != 0 ? 0 : 16
+        let graph = NSRect(x: rect.minX + 4, y: rect.minY + top, width: rect.width - 8, height: rect.height - top - bottom)
         guard graph.width > 1, graph.height > 1 else { return }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: graph).addClip()
@@ -685,7 +695,7 @@ final class MeterView: NSView {
         grid.stroke()
         draw(graph)
         NSGraphicsContext.restoreGraphicsState()
-        if name.hasPrefix("SPECTRUM") {
+        if meter == 0 {
             let maximum = asinh(Double(spectrumFrame.frequencies.last ?? 24000) / 20.0)
             for (frequency, label) in [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")] {
                 let x = graph.minX + graph.width * asinh(frequency / 20) / maximum
@@ -822,7 +832,7 @@ final class MeterView: NSView {
         guard let window else { return }
         let point = hoverPoint ?? convert(window.mouseLocationOutsideOfEventStream, from: nil)
         guard visibleRect.contains(point),
-              let (meter, rect) = graphs.first(where: { $0.key < 4 && $0.value.contains(point) }) else { return }
+              let (meter, rect) = graphs.first(where: { $0.value.contains(point) }) else { return }
         let x = max(0, min(1, (point.x - rect.minX) / rect.width))
         let y = max(0, min(1, (point.y - rect.minY) / rect.height))
         let timing = frameData.timing
@@ -861,7 +871,7 @@ final class MeterView: NSView {
                 let pixel = frameData.spectrogram[row * 512 + column]
                 lines.append(pixel == 0 ? "≤ −100 dBFS" : String(format: "≈ %.1f dBFS · row peak", Double(pixel) / 255 * 100 - 100))
             } else { lines.append("No history here yet") }
-        default:
+        case 3:
             let count = frameData.history.count / 4
             let column = Int(x * 1024) - (1024 - count)
             let channel = y < 0.5 ? 0 : 1
@@ -873,7 +883,10 @@ final class MeterView: NSView {
                 lines.append(String(format: "min %+.3f · max %+.3f", low, high))
                 lines.append(peak > 0 ? String(format: "Peak %.1f dBFS", 20 * log10(peak)) : "Peak −∞ dBFS")
             } else { lines.append("No history here yet") }
+        default:
+            guard horizontal else { return }
         }
+        if horizontal { lines.insert(meterTitle(meter), at: 0) }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: rect).addClip()
         NSColor.white.withAlphaComponent(0.5).setStroke()
@@ -886,7 +899,7 @@ final class MeterView: NSView {
             guide.move(to: NSPoint(x: rect.minX, y: point.y))
             guide.line(to: NSPoint(x: rect.maxX, y: point.y))
         }
-        guide.stroke()
+        if meter < 4 { guide.stroke() }
         if let marker {
             NSColor.white.setFill()
             NSBezierPath(ovalIn: NSRect(x: marker.x - 2, y: marker.y - 2, width: 4, height: 4)).fill()
