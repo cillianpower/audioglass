@@ -78,6 +78,10 @@ private final class AudioSummaryView: NSView {
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override var mouseDownCanMoveWindow: Bool { false }
+    // Clicking the loudness readout clears held peaks and the clip indicator.
+    override func mouseDown(with event: NSEvent) {
+        if convert(event.locationInWindow, from: nil).y >= 59 { meters?.resetPeakHold() }
+    }
     override func draw(_ dirtyRect: NSRect) {
         guard let meters else { return }
         let parts = meters.sourceLabel.components(separatedBy: " · ")
@@ -90,7 +94,7 @@ private final class AudioSummaryView: NSView {
                                  .paragraphStyle: paragraph])
         }
         if meters.visibleMeters.contains(5) {
-            ("LOUDNESS" as NSString).draw(at: NSPoint(x: 12, y: 59), withAttributes: [
+            (meters.loudnessHeading as NSString).draw(at: NSPoint(x: 12, y: 59), withAttributes: [
                 .font: (NSFont(name: "Menlo", size: 9) ?? NSFont.systemFont(ofSize: 9)),
                 .foregroundColor: NSColor.white.withAlphaComponent(0.55)])
             meters.loudness(in: NSRect(x: 10, y: 80, width: min(180, bounds.width - 24), height: max(110, bounds.height - 92)))

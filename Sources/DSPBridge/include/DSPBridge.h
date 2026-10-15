@@ -2,11 +2,21 @@
 #define AUDIOGLASS_DSP_H
 #include <stdint.h>
 #include <CoreAudio/CoreAudio.h>
-typedef struct { int32_t spectrum_count; int32_t scope_count; } AGFrameCounts;
+typedef struct { int32_t spectrum_count; int32_t scope_count; int32_t secondary_count; int32_t scope2_count; } AGFrameCounts;
+// Channel codes: 0 none, 1 mid, 2 side, 3 left, 4 right.
+typedef struct {
+    int32_t spectrum_secondary;
+    int32_t scope_channel, scope_channel2, scope_trigger; // trigger 0 = channel 1
+    int32_t scope_duration_ms;
+    int32_t waveform_channel1, waveform_channel2;
+    int32_t waveform_rms; // 0 off, 1 fast, 2 slow
+    int32_t stereo_bands;
+} AGMeterOptions;
 void *ag_create(void);
 void ag_destroy(void *engine);
 void ag_configure(void *engine, int32_t channel, int32_t fft_size, int32_t weighted,
     float floor_db, int32_t trigger_cycles, float wave_speed, float smoothing);
+void ag_configure_options(void *engine, const AGMeterOptions *options);
 void ag_ingest(void *engine, const float *pcm, int32_t frames, float sample_rate);
 // Single producer (HAL callback), single consumer (analysis queue).
 typedef struct AGTransport AGTransport;
@@ -19,9 +29,11 @@ uint64_t ag_transport_dropped(AGTransport *transport);
 uint64_t ag_transport_received(AGTransport *transport);
 void ag_transport_push(AGTransport *transport, const AudioBufferList *buffers);
 AGFrameCounts ag_process(void *engine, float smoothing,
-    float *frequencies, float *levels, int32_t spectrum_capacity,
-    float *waveform, int32_t scope_capacity);
-// Required capacities: wave 4096 floats, stereo 4000 floats, metrics 7 floats,
+    float *frequencies, float *levels, float *secondary, int32_t spectrum_capacity,
+    float *waveform, float *waveform2, int32_t scope_capacity);
+// Required capacities: wave 1024*6 floats (ch1 min/max, ch2 min/max, ch1/ch2 RMS),
+// stereo 4000 floats, metrics 14 floats (M, S, RMS fast L/R, true peak L/R,
+// correlation full/low/mid/high, RMS slow L/R, true peak max L/R since last read),
 // counts 2 int32s. Caller serializes with ingestion.
 void ag_read_meters(void *engine, float *wave, float *stereo, float *metrics, int32_t *counts);
 // Spectrogram: analysis changes clear history; geometry changes re-render it.

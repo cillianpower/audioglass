@@ -255,7 +255,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(withTitle: "Reset Section Sizes", action: #selector(resetSectionSizes(_:)), keyEquivalent: "").target = self
         viewMenu.addItem(withTitle: "Reset Analysis", action: #selector(resetAnalysis(_:)), keyEquivalent: "r").target = self
         addSettingMenu(to: viewMenu, title: "Frame Rate", key: "FrameRate", values: [("60 fps", 60), ("120 fps", 120)], selected: settings.frameRate)
-        let smoothingMenu = NSMenu(title: "Spectrum Smoothing")
+        let channels = [("Mid", 1), ("Side", 2), ("Left", 3), ("Right", 4)]
+        let normalization = [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)]
+
+        let spectrumMenu = NSMenu(title: "Spectrum")
+        let smoothingMenu = NSMenu(title: "Smoothing")
         let selected = [Float(0), 0.25, 0.65, 0.9, -1].firstIndex(of: smoothing) ?? 0
         for (index, title) in ["Off — Raw FFT", "Light", "Medium", "High", "Peak Hold — 12 dB/s"].enumerated() {
             let item = smoothingMenu.addItem(withTitle: title, action: #selector(changeSmoothing(_:)), keyEquivalent: "")
@@ -265,15 +269,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         smoothing = [Float(0), 0.25, 0.65, 0.9, -1][selected]
         meters.smoothingLabel = ["OFF", "LIGHT", "MEDIUM", "HIGH", "PEAK HOLD"][selected]
-        let smoothingItem = NSMenuItem(title: "Spectrum Smoothing", action: nil, keyEquivalent: "")
+        let smoothingItem = NSMenuItem(title: "Smoothing", action: nil, keyEquivalent: "")
         smoothingItem.submenu = smoothingMenu
-        viewMenu.addItem(smoothingItem)
-        addSettingMenu(to: viewMenu, title: "Spectrum / Scope Channel", key: "AnalysisChannel", values: [("Mid", 0), ("Side", 1), ("Left", 2), ("Right", 3)], selected: settings.channel)
-        addSettingMenu(to: viewMenu, title: "Spectrum FFT Size", key: "FFTSize", values: [("4096", 4096), ("8192", 8192), ("16384", 16384), ("32768", 32768)], selected: settings.fftSize)
-        addSettingMenu(to: viewMenu, title: "Spectrum Range", key: "SpectrumFloor", values: [("−60 to 0 dB", -60), ("−90 to 0 dB", -90), ("−120 to 0 dB", -120)], selected: settings.floor)
-        addSettingMenu(to: viewMenu, title: "Spectrum Weighting", key: "AWeighting", values: [("Unweighted", 0), ("A-weighted", 1)], selected: settings.weighted ? 1 : 0)
-        addSettingMenu(to: viewMenu, title: "Oscilloscope Trigger", key: "ScopeCycles", values: [("Zero Crossing — 50 ms", 0), ("Stable — 1 Cycle", 1), ("Stable — 2 Cycles", 2), ("Stable — 4 Cycles", 4)], selected: settings.cycles)
-        addSettingMenu(to: viewMenu, title: "Waveform History", key: "WaveSpeed", values: [("2.56 Seconds", 400), ("5.12 Seconds", 200), ("10.24 Seconds", 100)], selected: settings.waveSpeed)
+        spectrumMenu.addItem(smoothingItem)
+        addSettingMenu(to: spectrumMenu, title: "Source", key: "AnalysisChannel", values: [("Mid", 0), ("Side", 1), ("Left", 2), ("Right", 3)], selected: settings.channel)
+        addSettingMenu(to: spectrumMenu, title: "Second Trace", key: "SpectrumSecondary", values: [("None", 0)] + channels, selected: settings.spectrumSecondary)
+        addSettingMenu(to: spectrumMenu, title: "FFT Size", key: "FFTSize", values: [("4096", 4096), ("8192", 8192), ("16384", 16384), ("32768", 32768)], selected: settings.fftSize)
+        addSettingMenu(to: spectrumMenu, title: "Range", key: "SpectrumFloor", values: [("−60 to 0 dB", -60), ("−90 to 0 dB", -90), ("−120 to 0 dB", -120)], selected: settings.floor)
+        addSettingMenu(to: spectrumMenu, title: "Weighting", key: "AWeighting", values: [("Unweighted", 0), ("A-weighted", 1)], selected: settings.weighted ? 1 : 0)
+        addSettingMenu(to: spectrumMenu, title: "Frequency Scale", key: "SpectrumScale", values: [("Linear", 0), ("Logarithmic", 1), ("ERB", 2)], selected: settings.spectrumScale)
+        addSettingMenu(to: spectrumMenu, title: "Peak Label", key: "SpectrumPeakLabel", values: [("Off", 0), ("On", 1)], selected: settings.spectrumPeakLabel)
+        addGroup(spectrumMenu, to: viewMenu)
+
+        let scopeMenu = NSMenu(title: "Oscilloscope")
+        addSettingMenu(to: scopeMenu, title: "Channel", key: "ScopeChannel", values: channels, selected: settings.scopeChannel)
+        addSettingMenu(to: scopeMenu, title: "Second Channel", key: "ScopeChannel2", values: [("None", 0)] + channels, selected: settings.scopeChannel2)
+        addSettingMenu(to: scopeMenu, title: "Trigger", key: "ScopeCycles", values: [("Zero Crossing", 0), ("Stable — 1 Cycle", 1), ("Stable — 2 Cycles", 2), ("Stable — 4 Cycles", 4)], selected: settings.cycles)
+        addSettingMenu(to: scopeMenu, title: "Trigger Source", key: "ScopeTrigger", values: [("Same as Channel", 0)] + channels, selected: settings.scopeTrigger)
+        addSettingMenu(to: scopeMenu, title: "Capture Length", key: "ScopeDuration", values: [10, 20, 50, 100].map { ("\($0) ms", $0) }, selected: settings.scopeDuration)
+        addSettingMenu(to: scopeMenu, title: "Layout", key: "ScopeStacked", values: [("Overlaid", 0), ("Stacked", 1)], selected: settings.scopeStacked)
+        addSettingMenu(to: scopeMenu, title: "Persistence", key: "ScopePersistence", values: [("Off", 0), ("Short", 50), ("Medium", 75), ("Long", 90)], selected: settings.scopePersistence)
+        addSettingMenu(to: scopeMenu, title: "Normalization", key: "NormalizeScope", values: normalization, selected: settings.normalizeScope ? 1 : 0)
+        addGroup(scopeMenu, to: viewMenu)
+
         let spectrogramMenu = NSMenu(title: "Spectrogram")
         addSettingMenu(to: spectrogramMenu, title: "Reassignment", key: "SpectrogramReassign", values: [("On — Sharpened", 1), ("Off — Classic FFT", 0)], selected: settings.spectrogramReassign)
         addSettingMenu(to: spectrogramMenu, title: "FFT Size", key: "SpectrogramFFT", values: [1024, 2048, 4096, 8192, 16384].map { ("\($0)", $0) }, selected: settings.spectrogramFFT)
@@ -285,12 +303,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addSettingMenu(to: spectrogramMenu, title: "Spectral Tilt", key: "SpectrogramTilt", values: [("−3 dB/oct", -30), ("Off", 0), ("+1.5 dB/oct", 15), ("+3 dB/oct", 30), ("+4.5 dB/oct", 45), ("+6 dB/oct", 60)], selected: settings.spectrogramTilt)
         addSettingMenu(to: spectrogramMenu, title: "Orientation", key: "SpectrogramOrientation", values: [("Scroll Left", 0), ("Waterfall Down", 1), ("Waterfall Up", 2)], selected: settings.spectrogramOrientation)
         addSettingMenu(to: spectrogramMenu, title: "Palette", key: "SpectrogramPalette", values: [("Glass", 0), ("Heat", 1)], selected: settings.spectrogramPalette)
-        let spectrogramItem = NSMenuItem(title: "Spectrogram", action: nil, keyEquivalent: "")
-        spectrogramItem.submenu = spectrogramMenu
-        viewMenu.addItem(spectrogramItem)
-        addSettingMenu(to: viewMenu, title: "Oscilloscope Normalization", key: "NormalizeScope", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeScope ? 1 : 0)
-        addSettingMenu(to: viewMenu, title: "Waveform Normalization", key: "NormalizeWaveform", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeWaveform ? 1 : 0)
-        addSettingMenu(to: viewMenu, title: "Stereometer Normalization", key: "NormalizeStereo", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeStereo ? 1 : 0)
+        addGroup(spectrogramMenu, to: viewMenu)
+
+        let waveformMenu = NSMenu(title: "Waveform")
+        addSettingMenu(to: waveformMenu, title: "Channel", key: "WaveChannel1", values: channels, selected: settings.waveChannel1)
+        addSettingMenu(to: waveformMenu, title: "Second Channel", key: "WaveChannel2", values: [("None", 0)] + channels, selected: settings.waveChannel2)
+        addSettingMenu(to: waveformMenu, title: "History", key: "WaveSpeed", values: [("2.56 Seconds", 400), ("5.12 Seconds", 200), ("10.24 Seconds", 100)], selected: settings.waveSpeed)
+        addSettingMenu(to: waveformMenu, title: "RMS Overlay", key: "WaveRMS", values: [("Off", 0), ("Fast — 50 ms", 1), ("Slow — 370 ms", 2)], selected: settings.waveRMS)
+        addSettingMenu(to: waveformMenu, title: "Normalization", key: "NormalizeWaveform", values: normalization, selected: settings.normalizeWaveform ? 1 : 0)
+        addGroup(waveformMenu, to: viewMenu)
+
+        let stereoMenu = NSMenu(title: "Stereometer")
+        addSettingMenu(to: stereoMenu, title: "Mode", key: "StereoMode", values: [("Lissajous", 0), ("Dot Cloud", 1)], selected: settings.stereoMode)
+        addSettingMenu(to: stereoMenu, title: "Scale", key: "StereoScale", values: [("Linear", 0), ("Scaled — Quiet Detail", 1)], selected: settings.stereoScale)
+        addSettingMenu(to: stereoMenu, title: "Rotation", key: "StereoRotation", values: [("Mid Vertical", -1), ("Left / Right Axes", 0), ("Mid Horizontal", 1)], selected: settings.stereoRotation)
+        addSettingMenu(to: stereoMenu, title: "Left on Left", key: "StereoFlip", values: [("On", 1), ("Off", 0)], selected: settings.stereoFlip)
+        addSettingMenu(to: stereoMenu, title: "Correlation", key: "StereoCorrelation", values: [("Off", 0), ("Full Band", 1), ("Low / Mid / High", 2)], selected: settings.stereoCorrelation)
+        addSettingMenu(to: stereoMenu, title: "Normalization", key: "NormalizeStereo", values: normalization, selected: settings.normalizeStereo ? 1 : 0)
+        addGroup(stereoMenu, to: viewMenu)
+
+        let loudnessMenu = NSMenu(title: "Loudness")
+        addSettingMenu(to: loudnessMenu, title: "RMS", key: "LoudnessRMS", values: [("Fast — 300 ms", 0), ("Slow — 1 s", 1)], selected: settings.loudnessRMS)
+        addSettingMenu(to: loudnessMenu, title: "Peak Hold", key: "LoudnessPeakHold", values: [("Off", 0), ("3 Seconds", 3), ("10 Seconds", 10), ("Until Clicked", -1)], selected: settings.loudnessPeakHold)
+        addGroup(loudnessMenu, to: viewMenu)
         meters.settings = settings
         let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         viewItem.submenu = viewMenu
@@ -345,6 +380,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.items.filter { $0.action == #selector(changeLayout(_:)) }.forEach { $0.state = $0.tag == meters.arrangement ? .on : .off }
         meterContainer.needsLayout = true
         meters.needsDisplay = true
+    }
+
+    private func addGroup(_ menu: NSMenu, to parent: NSMenu) {
+        let item = NSMenuItem(title: menu.title, action: nil, keyEquivalent: "")
+        item.submenu = menu
+        parent.addItem(item)
     }
 
     private func addSettingMenu(to menu: NSMenu, title: String, key: String, values: [(String, Int)], selected: Int) {
@@ -436,7 +477,47 @@ final class MeterView: NSView {
     var arrangement = UserDefaults.standard.integer(forKey: "StripLayoutMode")
     var smoothingLabel = "OFF" { didSet { headerChanged?() } }
     var frameData = AnalysisFrame(frequencies: [], levels: [], waveform: []) {
-        didSet { hoverOverlay.needsDisplay = true; headerChanged?() }
+        didSet {
+            if settings.scopePersistence > 0, !oldValue.waveform.isEmpty {
+                scopeTrails.insert((oldValue.waveform, oldValue.waveform2), at: 0)
+                if scopeTrails.count > 24 { scopeTrails.removeLast() }
+            } else if settings.scopePersistence == 0 { scopeTrails.removeAll() }
+            updatePeakHold()
+            hoverOverlay.needsDisplay = true
+            headerChanged?()
+        }
+    }
+    /// Previous scope traces, newest first, for persistence.
+    private var scopeTrails: [([Float], [Float])] = []
+    private(set) var heldPeaks: [Float] = [-120, -120]
+    private var heldTimes: [CFTimeInterval] = [0, 0]
+    private var clipTime: CFTimeInterval?
+    var clipActive: Bool {
+        guard let clipTime else { return false }
+        return settings.loudnessPeakHold == -1 || CACurrentMediaTime() - clipTime < max(3, Double(settings.loudnessPeakHold))
+    }
+
+    private func updatePeakHold() {
+        let metrics = frameData.metrics
+        guard metrics.count == AnalysisFrame.metricCount else { return }
+        let now = CACurrentMediaTime()
+        let hold = settings.loudnessPeakHold
+        for channel in 0..<2 {
+            let peak = metrics[12 + channel]
+            if hold == 0 || peak >= heldPeaks[channel] || (hold > 0 && now - heldTimes[channel] > Double(hold)) {
+                heldPeaks[channel] = max(peak, metrics[4 + channel])
+                heldTimes[channel] = now
+            }
+        }
+        // Inter-sample (true) peaks above full scale.
+        if max(metrics[12], metrics[13]) > 0 { clipTime = now }
+    }
+
+    func resetPeakHold() {
+        heldPeaks = [-120, -120]
+        heldTimes = [0, 0]
+        clipTime = nil
+        headerChanged?()
     }
     var moduleOrder: [Int] = {
         let saved = UserDefaults.standard.array(forKey: "MeterOrder") as? [Int] ?? Array(0..<5)
@@ -464,12 +545,15 @@ final class MeterView: NSView {
         let elapsed = min(0.1, max(0, time - (lastNormalizationTime ?? time)))
         lastNormalizationTime = time
         if settings.normalizeScope {
-            let peak = frameData.waveform.reduce(Float.zero) { max($0, abs($1)) }
+            let peak = (frameData.waveform + frameData.waveform2).reduce(Float.zero) { max($0, abs($1)) }
             scopeNormalization.update(peak: peak, elapsed: elapsed)
         }
         if settings.normalizeWaveform {
             // One gain across the whole history and both channels preserves balance.
-            let peak = frameData.history.reduce(Float.zero) { max($0, abs($1)) }
+            var peak: Float = 0
+            for (index, value) in frameData.history.enumerated() where index % AnalysisFrame.waveStride < 4 {
+                peak = max(peak, abs(value))
+            }
             waveformNormalization.update(peak: peak, elapsed: elapsed)
         }
         if settings.normalizeStereo {
@@ -717,32 +801,47 @@ final class MeterView: NSView {
         draw(graph)
         NSGraphicsContext.restoreGraphicsState()
         if meter == 0 {
-            let maximum = asinh(Double(spectrumFrame.frequencies.last ?? 24000) / 20.0)
-            for (frequency, label) in [(100.0, "100"), (1000.0, "1k"), (10000.0, "10k")] {
-                let x = graph.minX + graph.width * asinh(frequency / 20) / maximum
+            for (frequency, label) in spectrumTicks {
+                let x = graph.minX + graph.width * spectrumPosition(frequency)
                 text(label, at: NSPoint(x: x - 7, y: graph.maxY + 3), size: 8, color: .white.withAlphaComponent(0.4))
             }
         }
     }
 
-    private func spectrum(in rect: NSRect) {
+    /// Horizontal position (0...1) of a frequency on the spectrum's axis.
+    private func spectrumPosition(_ hz: Double) -> CGFloat {
+        let maximum = FrequencyAxis.scaled(Double(spectrumFrame.frequencies.last ?? 24000), scale: settings.spectrumScale)
+        return CGFloat(FrequencyAxis.scaled(max(0, hz), scale: settings.spectrumScale) / max(maximum, 1e-9))
+    }
+
+    private var spectrumTicks: [(Double, String)] {
+        settings.spectrumScale == 0 ? [(5000, "5k"), (10000, "10k"), (15000, "15k"), (20000, "20k")]
+            : [(100, "100"), (1000, "1k"), (10000, "10k")]
+    }
+
+    private func spectrumLevel(_ level: Float) -> CGFloat {
+        CGFloat(max(0, min(1, (level - Float(settings.floor)) / Float(-settings.floor))))
+    }
+
+    private func spectrumTrace(_ levels: [Float], in rect: NSRect, alpha: CGFloat) {
+        let frequencies = spectrumFrame.frequencies
+        guard !levels.isEmpty, levels.count == frequencies.count else { return }
         var trace = PixelTrace(scale: window?.backingScaleFactor ?? 2)
         let path = trace.path
-        // OpenMeters' logarithmic axis uses an asinh knee at 20 Hz.
-        let maximum = asinh(Double(spectrumFrame.frequencies.last ?? 24000) / 20.0)
-        for pair in zip(spectrumFrame.frequencies, spectrumFrame.levels) {
-            let x = asinh(Double(pair.0) / 20.0) / maximum
-            let level = min(1, max(0, Double(pair.1 - Float(settings.floor)) / Double(-settings.floor)))
-            let point = NSPoint(x: rect.minX + rect.width * x, y: rect.maxY - rect.height * level)
-            trace.append(point)
+        for (frequency, level) in zip(frequencies, levels) {
+            trace.append(NSPoint(x: rect.minX + rect.width * spectrumPosition(Double(frequency)),
+                                 y: rect.maxY - rect.height * spectrumLevel(level)))
         }
         trace.finish()
-        NSColor.white.withAlphaComponent(0.92).setStroke()
+        NSColor.white.withAlphaComponent(alpha).setStroke()
         path.lineWidth = 1
         path.lineJoinStyle = .miter
         path.stroke()
-        for frequency in [100.0, 1000.0, 10000.0] {
-            let x = rect.minX + rect.width * asinh(frequency / 20) / maximum
+    }
+
+    private func spectrum(in rect: NSRect) {
+        for (frequency, _) in spectrumTicks {
+            let x = rect.minX + rect.width * spectrumPosition(frequency)
             NSColor.white.withAlphaComponent(0.08).setStroke()
             let grid = NSBezierPath()
             grid.lineWidth = 0.5
@@ -750,22 +849,67 @@ final class MeterView: NSView {
             grid.line(to: NSPoint(x: x, y: rect.maxY))
             grid.stroke()
         }
+        spectrumTrace(spectrumFrame.secondaryLevels, in: rect, alpha: 0.42)
+        spectrumTrace(spectrumFrame.levels, in: rect, alpha: 0.92)
+        guard settings.spectrumPeakLabel == 1 else { return }
+        let frame = spectrumFrame
+        guard let peak = frame.levels.indices.filter({ frame.frequencies[$0] >= 20 })
+            .max(by: { frame.levels[$0] < frame.levels[$1] }), frame.levels[peak] > Float(settings.floor) else { return }
+        let point = NSPoint(x: rect.minX + rect.width * spectrumPosition(Double(frame.frequencies[peak])),
+                            y: rect.maxY - rect.height * spectrumLevel(frame.levels[peak]))
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)).fill()
+        let label = frequencyLabel(Double(frame.frequencies[peak])) + String(format: " · %.1f dB", frame.levels[peak])
+        let width = CGFloat(label.count) * 5.5
+        let x = min(max(rect.minX + 2, point.x - width / 2), rect.maxX - width)
+        text(label, at: NSPoint(x: x, y: max(rect.minY + 1, point.y - 15)), size: 8, color: .white.withAlphaComponent(0.85))
     }
 
-    private func scope(in rect: NSRect) {
-        guard frameData.waveform.count > 1 else { return }
+    /// Lanes for the oscilloscope's traces: (samples, centre, half height, alpha).
+    private func scopeLanes(_ first: [Float], _ second: [Float], in rect: NSRect) -> [([Float], CGFloat, CGFloat, CGFloat)] {
+        guard !second.isEmpty else { return [(first, rect.midY, rect.height * 0.5, 0.92)] }
+        if settings.scopeStacked == 1 {
+            return [(first, rect.minY + rect.height * 0.25, rect.height * 0.25, 0.92),
+                    (second, rect.minY + rect.height * 0.75, rect.height * 0.25, 0.7)]
+        }
+        return [(second, rect.midY, rect.height * 0.5, 0.45), (first, rect.midY, rect.height * 0.5, 0.92)]
+    }
+
+    private func scopeTrace(_ samples: [Float], center: CGFloat, half: CGFloat, alpha: CGFloat, in rect: NSRect) {
+        guard samples.count > 1 else { return }
         var trace = PixelTrace(scale: window?.backingScaleFactor ?? 2)
         let path = trace.path
-        for (i, sample) in frameData.waveform.enumerated() {
-            let x = Double(i) / Double(frameData.waveform.count - 1)
-            let point = NSPoint(x: rect.minX + rect.width * x, y: rect.midY - Double(sample) * scopeGain * rect.height * 0.5)
-            trace.append(point)
+        for (i, sample) in samples.enumerated() {
+            let x = Double(i) / Double(samples.count - 1)
+            trace.append(NSPoint(x: rect.minX + rect.width * x, y: center - CGFloat(sample) * scopeGain * half))
         }
         trace.finish()
-        NSColor.white.withAlphaComponent(0.92).setStroke()
+        NSColor.white.withAlphaComponent(alpha).setStroke()
         path.lineWidth = 1
         path.lineJoinStyle = .miter
         path.stroke()
+    }
+
+    private func scope(in rect: NSRect) {
+        if settings.scopeStacked == 1 && !frameData.waveform2.isEmpty {
+            NSColor.white.withAlphaComponent(0.1).setStroke()
+            let divider = NSBezierPath()
+            divider.move(to: NSPoint(x: rect.minX, y: rect.midY))
+            divider.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+            divider.stroke()
+        }
+        // Older traces fade geometrically with the persistence factor.
+        let persistence = CGFloat(settings.scopePersistence) / 100
+        for (age, trail) in scopeTrails.enumerated().reversed() {
+            let fade = pow(persistence, CGFloat(age + 1))
+            guard fade > 0.04 else { continue }
+            for lane in scopeLanes(trail.0, trail.1, in: rect) {
+                scopeTrace(lane.0, center: lane.1, half: lane.2, alpha: lane.3 * fade * 0.6, in: rect)
+            }
+        }
+        for lane in scopeLanes(frameData.waveform, frameData.waveform2, in: rect) {
+            scopeTrace(lane.0, center: lane.1, half: lane.2, alpha: lane.3, in: rect)
+        }
     }
 
     private func spectrogram(in rect: NSRect) {
@@ -783,58 +927,135 @@ final class MeterView: NSView {
             sampleRate: frameData.timing[0])
     }
 
+    private static let shortChannelNames = ["", "M", "S", "L", "R"]
+
+    /// Waveform lanes: (centre, half height) for each configured channel.
+    private func waveformLanes(in rect: NSRect) -> [(CGFloat, CGFloat)] {
+        settings.waveChannel2 == 0 ? [(rect.midY, rect.height * 0.46)]
+            : [(rect.minY + rect.height * 0.25, rect.height * 0.23), (rect.minY + rect.height * 0.75, rect.height * 0.23)]
+    }
+
     private func history(in rect: NSRect) {
-        let count = frameData.history.count / 4
+        let stride = AnalysisFrame.waveStride
+        let count = frameData.history.count / stride
         guard count > 0 else { return }
-        for channel in 0..<2 {
-            let middle = rect.minY + rect.height * (channel == 0 ? 0.25 : 0.75)
+        let rms = settings.waveRMS != 0
+        for (lane, (middle, half)) in waveformLanes(in: rect).enumerated() {
+            let scale = half * waveformGain
             let path = NSBezierPath()
+            let envelope = NSBezierPath()
             for column in 0..<count {
+                let base = column * stride
                 let x = rect.maxX - CGFloat(count - column) / 1024 * rect.width
-                let low = CGFloat(frameData.history[column * 4 + channel * 2])
-                let high = CGFloat(frameData.history[column * 4 + channel * 2 + 1])
-                path.move(to: NSPoint(x: x, y: middle - high * waveformGain * rect.height * 0.23))
-                path.line(to: NSPoint(x: x, y: middle - low * waveformGain * rect.height * 0.23))
+                let low = CGFloat(frameData.history[base + lane * 2])
+                let high = CGFloat(frameData.history[base + lane * 2 + 1])
+                path.move(to: NSPoint(x: x, y: middle - high * scale))
+                path.line(to: NSPoint(x: x, y: middle - low * scale))
+                if rms {
+                    let level = CGFloat(frameData.history[base + 4 + lane])
+                    envelope.move(to: NSPoint(x: x, y: middle - level * scale))
+                    envelope.line(to: NSPoint(x: x, y: middle + level * scale))
+                }
             }
-            NSColor.white.withAlphaComponent(channel == 0 ? 0.9 : 0.55).setStroke()
+            NSColor.white.withAlphaComponent(rms ? 0.35 : lane == 0 ? 0.9 : 0.55).setStroke()
             path.lineWidth = 0.7
             path.stroke()
+            if rms {
+                NSColor.white.withAlphaComponent(lane == 0 ? 0.95 : 0.75).setStroke()
+                envelope.lineWidth = 0.7
+                envelope.stroke()
+            }
         }
-        text(String(format: "L / R · %.2f s", 1024.0 / Double(settings.waveSpeed)), at: NSPoint(x: rect.minX + 3, y: rect.minY + 2), size: 8, color: .white.withAlphaComponent(0.45))
+        let names = [settings.waveChannel1, settings.waveChannel2].filter { $0 != 0 }.map { Self.shortChannelNames[$0] }
+        text(String(format: "%@ · %.2f s", names.joined(separator: " / "), 1024.0 / Double(settings.waveSpeed)) + (rms ? " · RMS" : ""),
+             at: NSPoint(x: rect.minX + 3, y: rect.minY + 2), size: 8, color: .white.withAlphaComponent(0.45))
+    }
+
+    // Upstream OpenMeters stereometer projection (render.rs), drawn with AppKit.
+    private func stereoUnit(_ left: CGFloat, _ right: CGFloat) -> NSPoint {
+        let (l, r) = settings.stereoFlip == 1 ? (right, left) : (left, right)
+        let angle = CGFloat(settings.stereoRotation) * .pi / 4
+        let x = l * cos(angle) + r * sin(angle)
+        let y = l * sin(angle) - r * cos(angle)
+        guard settings.stereoScale == 1 else { return NSPoint(x: x, y: y) }
+        // radius = min((0.66834 * length)^0.3, 1), expanding quiet material.
+        let squared = x * x + y * y
+        guard squared > CGFloat(Float.ulpOfOne * Float.ulpOfOne) else { return .zero }
+        let scale = squared < 2.2387474 ? 0.8861337 * pow(squared, -0.35) : 1 / sqrt(squared)
+        return NSPoint(x: x * scale, y: y * scale)
     }
 
     private func stereo(in rect: NSRect) {
-        let radius = min(rect.width, rect.height - 18) * 0.48
+        let footer: CGFloat = settings.stereoCorrelation == 0 ? 0 : 18
+        let radius = min(rect.width, rect.height - footer) * 0.48
         guard radius > 0 else { return }
-        let center = NSPoint(x: rect.midX, y: rect.minY + (rect.height - 18) / 2)
+        let center = NSPoint(x: rect.midX, y: rect.minY + (rect.height - footer) / 2)
+        let scaled = settings.stereoScale == 1
         NSColor.white.withAlphaComponent(0.1).setStroke()
         NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)).stroke()
-        let axis = NSBezierPath()
-        axis.move(to: NSPoint(x: center.x, y: center.y - radius))
-        axis.line(to: NSPoint(x: center.x, y: center.y + radius))
-        axis.stroke()
+        if scaled {
+            // −48, −24 and −12 dBFS guides.
+            NSColor.white.withAlphaComponent(0.05).setStroke()
+            for level in [0.0039810717, 0.06309573, 0.25118864] as [CGFloat] {
+                let ring = radius * min(1, pow(0.66834 * level, 0.3))
+                NSBezierPath(ovalIn: NSRect(x: center.x - ring, y: center.y - ring, width: ring * 2, height: ring * 2)).stroke()
+            }
+        }
+        for (axis, alpha) in [((1.0, 1.0), 0.1), ((1.0, 0.0), 0.05), ((0.0, 1.0), 0.05)] as [((CGFloat, CGFloat), CGFloat)] {
+            let end = stereoUnit(axis.0, axis.1)
+            let length = max(hypot(end.x, end.y), 1e-6)
+            let line = NSBezierPath()
+            line.move(to: NSPoint(x: center.x - end.x / length * radius, y: center.y - end.y / length * radius))
+            line.line(to: NSPoint(x: center.x + end.x / length * radius, y: center.y + end.y / length * radius))
+            NSColor.white.withAlphaComponent(alpha).setStroke()
+            line.stroke()
+        }
+        // The scaled view is already level-compressed, so display gain applies to linear only.
+        let gain = scaled ? 1 : stereoGain
         let path = NSBezierPath()
-        for index in stride(from: 0, to: max(0, frameData.stereo.count - 1), by: 2) {
-            let left = CGFloat(frameData.stereo[index])
-            let right = CGFloat(frameData.stereo[index + 1])
-            let point = NSPoint(x: center.x + (right - left) * stereoGain * radius / sqrt(2),
-                y: center.y - (left + right) * stereoGain * radius / sqrt(2))
-            if index == 0 { path.move(to: point) } else { path.line(to: point) }
+        for index in Swift.stride(from: 0, to: max(0, frameData.stereo.count - 1), by: 2) {
+            let unit = stereoUnit(CGFloat(frameData.stereo[index]) * gain, CGFloat(frameData.stereo[index + 1]) * gain)
+            let point = NSPoint(x: center.x + unit.x * radius, y: center.y + unit.y * radius)
+            if settings.stereoMode == 1 { path.appendRect(NSRect(x: point.x - 0.6, y: point.y - 0.6, width: 1.2, height: 1.2)) }
+            else if index == 0 { path.move(to: point) } else { path.line(to: point) }
         }
-        NSColor.white.withAlphaComponent(0.65).setStroke()
-        path.lineWidth = 0.7
-        path.stroke()
-        if frameData.metrics.count == 7 {
-            let value = frameData.metrics[6]
-            text(String(format: "CORR %+.2f", value), at: NSPoint(x: rect.minX + 2, y: rect.maxY - 13), size: 9, color: .white.withAlphaComponent(0.7))
+        if settings.stereoMode == 1 {
+            NSColor.white.withAlphaComponent(0.55).setFill()
+            path.fill()
+        } else {
+            NSColor.white.withAlphaComponent(0.65).setStroke()
+            path.lineWidth = 0.7
+            path.stroke()
         }
+        let metrics = frameData.metrics
+        guard settings.stereoCorrelation != 0, metrics.count == AnalysisFrame.metricCount else { return }
+        let y = rect.maxY - 13
+        if settings.stereoCorrelation == 2 {
+            text(String(format: "LO %+.2f  MID %+.2f  HI %+.2f", metrics[7], metrics[8], metrics[9]),
+                 at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.7), width: rect.width - 4)
+            return
+        }
+        text(String(format: "CORR %+.2f", metrics[6]), at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.7))
+        let bar = NSRect(x: rect.minX + 76, y: y + 6, width: rect.width - 80, height: 1)
+        guard bar.width > 20 else { return }
+        NSColor.white.withAlphaComponent(0.15).setFill()
+        bar.fill()
+        NSRect(x: bar.midX - 0.5, y: bar.minY - 3, width: 1, height: 7).fill()
+        let marker = bar.minX + bar.width * CGFloat((max(-1, min(1, metrics[6])) + 1) / 2)
+        NSColor.white.withAlphaComponent(0.85).setFill()
+        NSRect(x: marker - 1, y: bar.minY - 3, width: 2, height: 7).fill()
+    }
+
+    var loudnessHeading: String {
+        "LOUDNESS" + (settings.loudnessRMS == 1 ? " · SLOW RMS" : "") + (settings.loudnessPeakHold != 0 ? " · HOLD" : "")
     }
 
     func loudness(in rect: NSRect) {
-        guard frameData.metrics.count == 7 else { return }
+        guard frameData.metrics.count == AnalysisFrame.metricCount else { return }
         let metrics = frameData.metrics
-        let lineHeight = min(24, max(17, rect.height / 5))
-        for (index, pair) in [("M", metrics[0]), ("S", metrics[1]), ("RMS L", metrics[2]), ("RMS R", metrics[3])].enumerated() {
+        let rms = settings.loudnessRMS == 1 ? (metrics[10], metrics[11]) : (metrics[2], metrics[3])
+        let lineHeight = min(24, max(17, rect.height / 6))
+        for (index, pair) in [("M", metrics[0]), ("S", metrics[1]), ("RMS L", rms.0), ("RMS R", rms.1)].enumerated() {
             let y = rect.minY + CGFloat(index) * lineHeight
             let value = pair.1.isFinite && pair.1 > -99.8 ? String(format: "%.1f", pair.1) : "−∞"
             text("\(pair.0)  \(value) \(index < 2 ? "LUFS" : "dBFS")", at: NSPoint(x: rect.minX + 2, y: y), size: 10, color: .white.withAlphaComponent(0.85))
@@ -842,11 +1063,21 @@ final class MeterView: NSView {
             NSColor.white.withAlphaComponent(0.55).setFill()
             bar.fill()
         }
+        let peak = { (value: Float) in value > -99.8 ? String(format: "%.1f", value) : "−∞" }
+        var y = rect.minY + lineHeight * 4
         if rect.height > 75 {
-            let left = metrics[4] > -99.8 ? String(format: "%.1f", metrics[4]) : "−∞"
-            let right = metrics[5] > -99.8 ? String(format: "%.1f", metrics[5]) : "−∞"
-            text("TP \(left) / \(right) dBTP",
-                at: NSPoint(x: rect.minX + 2, y: rect.minY + lineHeight * 4), size: 9, color: .white.withAlphaComponent(0.6))
+            text("TP \(peak(metrics[4])) / \(peak(metrics[5])) dBTP", at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.6))
+            y += 14
+        }
+        if settings.loudnessPeakHold != 0 && rect.height > 90 {
+            text("MAX \(peak(heldPeaks[0])) / \(peak(heldPeaks[1])) dBTP", at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.85))
+            y += 14
+        }
+        if clipActive {
+            let badge = NSRect(x: rect.minX + 2, y: y + 2, width: 34, height: 13)
+            NSColor.white.withAlphaComponent(0.9).setFill()
+            NSBezierPath(roundedRect: badge, xRadius: 3, yRadius: 3).fill()
+            text("CLIP", at: NSPoint(x: badge.minX + 4, y: badge.minY), size: 9, color: .black.withAlphaComponent(0.85))
         }
     }
 
@@ -877,7 +1108,8 @@ final class MeterView: NSView {
         var marker: NSPoint?
         switch meter {
         case 0:
-            let hz = sinh(Double(x) * asinh(Double(spectrumFrame.frequencies.last ?? Float(rate / 2)) / 20)) * 20
+            let maximum = FrequencyAxis.scaled(Double(spectrumFrame.frequencies.last ?? Float(rate / 2)), scale: settings.spectrumScale)
+            let hz = FrequencyAxis.frequency(Double(x) * maximum, scale: settings.spectrumScale)
             if let index = spectrumFrame.frequencies.indices.min(by: {
                 abs(Double(spectrumFrame.frequencies[$0]) - hz) < abs(Double(spectrumFrame.frequencies[$1]) - hz)
             }), index < spectrumFrame.levels.count {
@@ -885,18 +1117,30 @@ final class MeterView: NSView {
                 let level = spectrumFrame.levels[index]
                 lines = [frequencyLabel(frequency), String(format: "%.1f dB%@ · %@", level,
                     settings.weighted ? "(A)" : "FS", ["MID", "SIDE", "LEFT", "RIGHT"][settings.channel])]
-                marker = NSPoint(x: rect.minX + rect.width * asinh(frequency / 20) / asinh(Double(spectrumFrame.frequencies.last ?? 24000) / 20),
-                    y: rect.maxY - rect.height * CGFloat(max(0, min(1, (level - Float(settings.floor)) / Float(-settings.floor)))))
+                if index < spectrumFrame.secondaryLevels.count {
+                    lines.append(String(format: "%.1f dB%@ · %@", spectrumFrame.secondaryLevels[index],
+                        settings.weighted ? "(A)" : "FS", MeterSettings.channelNames[settings.spectrumSecondary]))
+                }
+                marker = NSPoint(x: rect.minX + rect.width * spectrumPosition(frequency), y: rect.maxY - rect.height * spectrumLevel(level))
             } else { lines = [frequencyLabel(hz), "Waiting for spectrum"] }
         case 1:
             if frameData.waveform.count > 1 {
                 let index = Int((x * CGFloat(frameData.waveform.count - 1)).rounded())
-                let sample = frameData.waveform[index]
-                lines = [String(format: "%.2f ms · %@", Double(index) / Double(frameData.waveform.count - 1) * Double(timing[1]) * 1000,
-                    ["MID", "SIDE", "LEFT", "RIGHT"][settings.channel]), amplitudeLabel(sample),
-                    settings.cycles == 0 ? "Zero-crossing trigger" : timing[2] > 0 ? frequencyLabel(Double(timing[2])) : "No stable pitch · free running"]
+                let stacked = settings.scopeStacked == 1 && !frameData.waveform2.isEmpty
+                // Stacked: the hovered lane; overlaid: channel 1 first, then channel 2.
+                let second = stacked && y >= 0.5
+                let samples = second ? frameData.waveform2 : frameData.waveform
+                let sample = samples[min(index, samples.count - 1)]
+                let name = MeterSettings.channelNames[second ? settings.scopeChannel2 : settings.scopeChannel]
+                lines = [String(format: "%.2f ms · %@", Double(index) / Double(frameData.waveform.count - 1) * Double(timing[1]) * 1000, name),
+                    amplitudeLabel(sample)]
+                if !stacked, !frameData.waveform2.isEmpty {
+                    lines.append(amplitudeLabel(frameData.waveform2[min(index, frameData.waveform2.count - 1)]) + " · " + MeterSettings.channelNames[settings.scopeChannel2])
+                }
+                lines.append(settings.cycles == 0 ? "Zero-crossing trigger" : timing[2] > 0 ? frequencyLabel(Double(timing[2])) : "No stable pitch · free running")
+                let lane = scopeLanes(frameData.waveform, frameData.waveform2, in: rect).first { $0.0 == samples } ?? (samples, rect.midY, rect.height * 0.5, 1)
                 marker = NSPoint(x: rect.minX + CGFloat(index) / CGFloat(frameData.waveform.count - 1) * rect.width,
-                    y: rect.midY - CGFloat(sample) * scopeGain * rect.height * 0.5)
+                    y: lane.1 - CGFloat(sample) * scopeGain * lane.2)
             } else { lines = ["Waiting for oscilloscope"] }
         case 2:
             // Matches the shader: time 0 oldest .. 1 newest, frequency 0 lowest .. 1 highest.
@@ -912,16 +1156,22 @@ final class MeterView: NSView {
                 lines.append(db <= -139.99 ? "≤ −140 dBFS" : String(format: "%.1f dBFS · %@", db, kind))
             } else { lines.append("No history here yet") }
         case 3:
-            let count = frameData.history.count / 4
+            let stride = AnalysisFrame.waveStride
+            let count = frameData.history.count / stride
             let column = Int(x * 1024) - (1024 - count)
-            let channel = y < 0.5 ? 0 : 1
-            lines = [String(format: "%.3f s ago · %@", Double(1024 - min(1023, Int(x * 1024))) / Double(settings.waveSpeed), channel == 0 ? "LEFT" : "RIGHT")]
+            let channel = settings.waveChannel2 != 0 && y >= 0.5 ? 1 : 0
+            lines = [String(format: "%.3f s ago · %@", Double(1024 - min(1023, Int(x * 1024))) / Double(settings.waveSpeed),
+                MeterSettings.channelNames[channel == 0 ? settings.waveChannel1 : settings.waveChannel2])]
             if column >= 0 && column < count {
-                let low = frameData.history[column * 4 + channel * 2]
-                let high = frameData.history[column * 4 + channel * 2 + 1]
+                let low = frameData.history[column * stride + channel * 2]
+                let high = frameData.history[column * stride + channel * 2 + 1]
                 let peak = max(abs(low), abs(high))
                 lines.append(String(format: "min %+.3f · max %+.3f", low, high))
                 lines.append(peak > 0 ? String(format: "Peak %.1f dBFS", 20 * log10(peak)) : "Peak −∞ dBFS")
+                if settings.waveRMS != 0 {
+                    let level = frameData.history[column * stride + 4 + channel]
+                    lines.append(level > 0 ? String(format: "RMS %.1f dBFS", 20 * log10(level)) : "RMS −∞ dBFS")
+                }
             } else { lines.append("No history here yet") }
         default:
             guard horizontal else { return }

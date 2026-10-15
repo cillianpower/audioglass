@@ -135,3 +135,16 @@ Spectrogram:
 - Controls (View → Spectrogram, rendered as a Settings section): reassignment, FFT 1024–16384, hop FFT÷4…÷128, window, zero padding 1–8×, linear/log/ERB, floor −60…−140, tilt −3…+6 dB/oct, Scroll Left / Waterfall Down / Waterfall Up, Glass / Heat palette. Defaults follow upstream (reassigned, 4096, ÷16, Hann, log, −120 dB, +4.5 dB/oct) except the palette, which stays white glass.
 
 Validation: 80 Rust tests pass (new raster unit tests plus a bridge test placing a 1 kHz tone on its row in both modes with reassignment narrower than classic, incremental column counts, and history clearing on analysis changes). Swift build is warning-free. Live system-audio test with a generated sweep/440 Hz/click WAV: reassigned and classic, Glass and Heat, Scroll Left and Waterfall Down all rendered correctly; Settings shows the Spectrogram section. Defaults restored afterwards. Not verified: hover readout on screen, Waterfall Up, ERB/linear scales, very large windows (performance), sustained-load timing.
+
+## Per-meter controls (2026-10-15)
+
+View menu is grouped into Spectrum / Oscilloscope / Spectrogram / Waveform / Stereometer / Loudness submenus; Settings renders each as a section. Existing UserDefaults keys are unchanged. The oscilloscope now has its own `ScopeChannel` (seeded from the old shared `AnalysisChannel` on first read); `AnalysisChannel` is the spectrum source only.
+
+- Bridge: `ag_configure_options(AGMeterOptions)` (channel codes 0 none, 1 mid, 2 side, 3 left, 4 right). `ag_process` gains secondary-spectrum and second-scope buffers. Waveform columns are 6 floats (ch1/ch2 min/max, ch1/ch2 RMS amplitude); metrics are 14 floats (adds band correlations, slow RMS, true-peak max since last read). Waveform band analysis and stereo band analysis only run while the RMS overlay / band correlation is selected.
+- Spectrum second trace uses upstream `secondary_source`; frequency axis linear/log/ERB shared with `FrequencyAxis`; peak label at the loudest ≥20 Hz bin.
+- Scope: channel 1/2, trigger source, segment duration 10/20/50/100 ms, overlaid or stacked, persistence (geometric fade over up to 24 presented frames).
+- Waveform: any of L/R/M/S per lane (second lane optional), fast/slow RMS envelope summed from upstream band powers.
+- Stereometer: upstream projection (rotation, flip, scaled radial compression with −48/−24/−12 dB guides) without upstream's linear fit factor so defaults match the previous view; Lissajous or dot cloud; correlation off/full-band bar/low-mid-high.
+- Loudness: fast/slow RMS, true-peak hold off/3 s/10 s/until clicked using exact per-read maxima, CLIP badge above 0 dBTP; clicking the loudness area resets.
+
+Validation: 81 Rust tests (new options test: secondary/second-trace silence for mono Side, RMS ≈ 0.177 for a 0.25 sine, band correlations, peak max reset). Build warning-free. Live stereo-signal screenshots confirmed second spectrum trace and peak label, stacked scope with persistence, M/S waveform RMS, scaled dot cloud with band correlation, loudness HOLD/MAX. Test settings and window frame restored. Not verified live: CLIP badge (needs >0 dBTP output), linear/ERB spectrum axis, rotations other than default, click-to-reset.

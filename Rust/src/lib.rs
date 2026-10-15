@@ -13,8 +13,8 @@ use visuals::stereometer::processor::{StereometerConfig, StereometerProcessor};
 use visuals::loudness::processor::{LoudnessConfig, LoudnessProcessor};
 
 use dsp::{AudioBlock, ChannelPosition, MAX_AUDIO_CHANNELS};
-use util::audio::{Channel, FrequencyScale, WindowKind};
-use visuals::oscilloscope::processor::{OscilloscopeConfig, OscilloscopeProcessor};
+use util::audio::{Channel, FrequencyScale, WindowKind, DB_FLOOR};
+use visuals::oscilloscope::processor::{OscilloscopeConfig, OscilloscopeProcessor, TriggerMode};
 use visuals::spectrum::processor::{AveragingMode, SpectrumConfig, SpectrumProcessor};
 
 pub struct Engine {
@@ -22,10 +22,11 @@ pub struct Engine {
     spectrogram: SpectrogramProcessor,
     stereo: StereometerProcessor,
     loudness: LoudnessProcessor,
-    history_columns: VecDeque<[f32; 4]>,
+    history_columns: VecDeque<[f32; WAVE_STRIDE]>,
     raster: SpectrogramRaster,
     stereo_points: Vec<f32>,
-    metrics: [f32; 7],
+    metrics: [f32; METRIC_COUNT],
+    options: MeterOptions,
     sample_rate: f32,
     scope_duration: f32,
     scope_cycle_hz: f32,
@@ -35,11 +36,53 @@ pub struct Engine {
     smoothing: f32,
     frequencies: Vec<f32>,
     levels: Vec<f32>,
+    secondary_levels: Vec<f32>,
     waveform: Vec<f32>,
+    waveform2: Vec<f32>,
 }
 
+/// Per column: channel 1 min/max, channel 2 min/max, channel 1/2 RMS amplitude.
+pub const WAVE_STRIDE: usize = 6;
+/// M, S, RMS fast L/R, displayed true peak L/R, correlation full/low/mid/high,
+/// RMS slow L/R, true peak maximum L/R since the previous read.
+pub const METRIC_COUNT: usize = 14;
+const TRUE_PEAK_MAX: usize = 12;
+
 #[repr(C)]
-pub struct FrameCounts { pub spectrum_count: i32, pub scope_count: i32 }
+pub struct FrameCounts { pub spectrum_count: i32, pub scope_count: i32, pub secondary_count: i32, pub scope2_count: i32 }
+
+/// Channel codes: 0 none, 1 mid, 2 side, 3 left, 4 right.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterOptions {
+    pub spectrum_secondary: i32,
+    pub scope_channel: i32,
+    pub scope_channel2: i32,
+    /// 0 follows channel 1.
+    pub scope_trigger: i32,
+    pub scope_duration_ms: i32,
+    pub waveform_channel1: i32,
+    pub waveform_channel2: i32,
+    /// 0 off, 1 fast, 2 slow.
+    pub waveform_rms: i32,
+    pub stereo_bands: i32,
+}
+
+impl Default for MeterOptions {
+    fn default() -> Self {
+        Self { spectrum_secondary: 0, scope_channel: 1, scope_channel2: 0, scope_trigger: 0, scope_duration_ms: 50,
+            waveform_channel1: 3, waveform_channel2: 4, waveform_rms: 0, stereo_bands: 0 }
+    }
+}
+
+fn channel(code: i32) -> Channel {
+    match code { 1 => Channel::Mid, 2 => Channel::Side, 3 => Channel::Left, 4 => Channel::Right, _ => Channel::None }
+}
+
+/// Index into upstream's derived waveform channels (L, R, M, S).
+fn waveform_index(code: i32) -> Option<usize> {
+    match code { 3 => Some(0), 4 => Some(1), 1 => Some(2), 2 => Some(3), _ => None }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ag_create() -> *mut Engine {
@@ -55,14 +98,17 @@ pub extern "C" fn ag_create() -> *mut Engine {
         loudness: LoudnessProcessor::new(LoudnessConfig::default()),
         history_columns: VecDeque::with_capacity(1024),
         raster,
-        stereo_points: Vec::new(), metrics: [-120.0, -120.0, -120.0, -120.0, -120.0, -120.0, 0.0],
+        stereo_points: Vec::new(),
+        metrics: [-120.0, -120.0, -120.0, -120.0, -120.0, -120.0, 0.0, 0.0, 0.0, 0.0, -120.0, -120.0, -120.0, -120.0],
+        options: MeterOptions::default(),
         sample_rate: 48000.0, scope_duration: 0.0, scope_cycle_hz: 0.0, weighted: false,
         spectrum: SpectrumProcessor::new(SpectrumConfig {
             secondary_source: Channel::None, ..SpectrumConfig::default()
         }),
         scope: OscilloscopeProcessor::new(OscilloscopeConfig::default()),
         smoothing: 0.0,
-        frequencies: Vec::new(), levels: Vec::new(), waveform: Vec::new(),
+        frequencies: Vec::new(), levels: Vec::new(), secondary_levels: Vec::new(),
+        waveform: Vec::new(), waveform2: Vec::new(),
     }))
 }
 
@@ -92,9 +138,8 @@ pub unsafe extern "C" fn ag_configure(engine: *mut Engine, channel: i32, fft_siz
         ..e.spectrum.config()
     });
     e.scope.update_config(OscilloscopeConfig {
-        channel_1: source,
-        trigger_mode: if trigger_cycles == 0 { visuals::oscilloscope::processor::TriggerMode::ZeroCrossing }
-            else { visuals::oscilloscope::processor::TriggerMode::Stable { num_cycles: trigger_cycles.clamp(1, 4) as usize } },
+        trigger_mode: if trigger_cycles == 0 { TriggerMode::ZeroCrossing }
+            else { TriggerMode::Stable { num_cycles: trigger_cycles.clamp(1, 4) as usize } },
         ..e.scope.config()
     });
     let speed = if wave_speed.is_finite() { wave_speed.clamp(100.0, 400.0) } else { 200.0 };
@@ -102,6 +147,37 @@ pub unsafe extern "C" fn ag_configure(engine: *mut Engine, channel: i32, fft_siz
         e.history_columns.clear();
         e.history.reset_audio();
         e.history.update_config(WaveformConfig { scroll_speed: speed, ..e.history.config() });
+    }
+}
+
+/// Display options beyond `ag_configure`; unchanged values leave processors alone.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ag_configure_options(engine: *mut Engine, options: *const MeterOptions) {
+    if engine.is_null() || options.is_null() { return; }
+    let e = unsafe { &mut *engine };
+    let mut o = unsafe { *options };
+    if channel(o.scope_channel) == Channel::None { o.scope_channel = 1; }
+    if waveform_index(o.waveform_channel1).is_none() { o.waveform_channel1 = 3; }
+    o.scope_duration_ms = o.scope_duration_ms.clamp(5, 200);
+    o.waveform_rms = o.waveform_rms.clamp(0, 2);
+    let previous = std::mem::replace(&mut e.options, o);
+    e.spectrum.update_config(SpectrumConfig { secondary_source: channel(o.spectrum_secondary), ..e.spectrum.config() });
+    if channel(o.spectrum_secondary) == Channel::None { e.secondary_levels.clear(); }
+    e.scope.update_config(OscilloscopeConfig {
+        channel_1: channel(o.scope_channel), channel_2: channel(o.scope_channel2),
+        trigger_source: channel(o.scope_trigger), segment_duration: o.scope_duration_ms as f32 / 1000.0,
+        ..e.scope.config()
+    });
+    if (previous.waveform_channel1, previous.waveform_channel2, previous.waveform_rms != 0)
+        != (o.waveform_channel1, o.waveform_channel2, o.waveform_rms != 0) {
+        e.history_columns.clear();
+        e.history.reset_audio();
+        // Band analysis (and its cost) only runs while the RMS overlay is shown.
+        e.history.update_config(WaveformConfig { analyze_bands: o.waveform_rms != 0, track_history: o.waveform_rms != 0,
+            ..e.history.config() });
+    }
+    if previous.stereo_bands != o.stereo_bands {
+        e.stereo.update_config(StereometerConfig { analyze_bands: o.stereo_bands != 0, ..e.stereo.config() });
     }
 }
 
@@ -119,15 +195,28 @@ pub unsafe extern "C" fn ag_ingest(engine: *mut Engine, pcm: *const f32, frames:
     e.sample_rate = sample_rate;
     let update = e.history.process_block(&block);
     if update.reset { e.history_columns.clear(); }
+    let first = waveform_index(e.options.waveform_channel1).unwrap_or(0);
+    let second = waveform_index(e.options.waveform_channel2);
+    let window = (e.options.waveform_rms.max(1) - 1) as usize;
+    // Full-band RMS: the crossover bands' mean powers sum to the signal's.
+    let rms = |column: &visuals::waveform::processor::WaveColumn| {
+        let power: f32 = column.rms_db[window].iter().filter(|db| **db > DB_FLOOR)
+            .map(|db| 10f32.powf(db / 10.0)).sum();
+        power.sqrt()
+    };
     for columns in update.columns {
         if e.history_columns.len() == 1024 { e.history_columns.pop_front(); }
-        e.history_columns.push_back([columns[0].min, columns[0].max, columns[1].min, columns[1].max]);
+        let a = &columns[first];
+        let b = second.map(|index| &columns[index]);
+        e.history_columns.push_back([a.min, a.max, b.map_or(0.0, |b| b.min), b.map_or(0.0, |b| b.max),
+            if e.options.waveform_rms != 0 { rms(a) } else { 0.0 },
+            if e.options.waveform_rms != 0 { b.map_or(0.0, rms) } else { 0.0 }]);
     }
     if let Some(update) = e.spectrogram.process_block(&block) { e.raster.push(update); }
     if let Some(snapshot) = e.stereo.process_block(&block) {
         e.stereo_points.clear();
         for &(left, right) in snapshot.points[0].iter() { e.stereo_points.extend([left, right]); }
-        e.metrics[6] = snapshot.correlations[0];
+        e.metrics[6..10].copy_from_slice(&snapshot.correlations);
     }
     let loudness = e.loudness.process_block(&block);
     let previous = e.metrics;
@@ -135,16 +224,29 @@ pub unsafe extern "C" fn ag_ingest(engine: *mut Engine, pcm: *const f32, frames:
         loudness.rms_fast_db[0], loudness.rms_fast_db[1],
         loudness.true_peak_db[0].max(previous[4] - frames as f32 / sample_rate * 20.0),
         loudness.true_peak_db[1].max(previous[5] - frames as f32 / sample_rate * 20.0)]);
+    e.metrics[10..12].copy_from_slice(&loudness.rms_slow_db[..2]);
+    for channel in 0..2 {
+        e.metrics[TRUE_PEAK_MAX + channel] = e.metrics[TRUE_PEAK_MAX + channel].max(loudness.true_peak_db[channel]);
+    }
     if let Some(snapshot) = e.spectrum.process_block(&block) {
         e.frequencies.clone_from(&snapshot.frequency_bins);
         // Upstream stores A-weighted first, unweighted/raw second.
-        e.levels.clone_from(&snapshot.traces[0][if e.weighted { 0 } else { 1 }]);
+        let trace = if e.weighted { 0 } else { 1 };
+        e.levels.clone_from(&snapshot.traces[0][trace]);
+        if channel(e.options.spectrum_secondary) != Channel::None {
+            e.secondary_levels.clone_from(&snapshot.traces[1][trace]);
+        }
     }
     if let Some(snapshot) = e.scope.process_block(&block) {
         e.scope_duration = snapshot.duration_seconds;
         e.scope_cycle_hz = snapshot.cycle_hz.unwrap_or(0.0);
+        let n = snapshot.samples_per_channel;
         e.waveform.clear();
-        e.waveform.extend_from_slice(&snapshot.samples[..snapshot.samples_per_channel]);
+        e.waveform2.clear();
+        for trace in 0..snapshot.channels {
+            let samples = &snapshot.samples[trace * n..(trace + 1) * n];
+            match snapshot.slots[trace] { 0 => e.waveform.extend_from_slice(samples), _ => e.waveform2.extend_from_slice(samples) }
+        }
     }
  }
 
@@ -153,11 +255,12 @@ pub unsafe extern "C" fn ag_ingest(engine: *mut Engine, pcm: *const f32, frames:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ag_process(
     engine: *mut Engine, smoothing: f32,
-    frequencies: *mut f32, levels: *mut f32, spectrum_capacity: i32,
-    waveform: *mut f32, scope_capacity: i32,
+    frequencies: *mut f32, levels: *mut f32, secondary: *mut f32, spectrum_capacity: i32,
+    waveform: *mut f32, waveform2: *mut f32, scope_capacity: i32,
 ) -> FrameCounts {
-    let empty = FrameCounts { spectrum_count: 0, scope_count: 0 };
+    let empty = FrameCounts { spectrum_count: 0, scope_count: 0, secondary_count: 0, scope2_count: 0 };
     if engine.is_null() || frequencies.is_null() || levels.is_null() || waveform.is_null()
+        || secondary.is_null() || waveform2.is_null()
         || spectrum_capacity <= 0 || scope_capacity <= 0 { return empty; }
     let e = unsafe { &mut *engine };
     let smoothing = if smoothing == -1.0 { -1.0 } else if smoothing.is_finite() { smoothing.clamp(0.0, 0.95) } else { 0.0 };
@@ -172,16 +275,21 @@ pub unsafe extern "C" fn ag_process(
     }
     let spectrum_count = e.frequencies.len().min(e.levels.len()).min(spectrum_capacity as usize);
     let scope_count = e.waveform.len().min(scope_capacity as usize);
+    let secondary_count = e.secondary_levels.len().min(spectrum_count);
+    let scope2_count = e.waveform2.len().min(scope_capacity as usize);
     unsafe {
         std::ptr::copy_nonoverlapping(e.frequencies.as_ptr(), frequencies, spectrum_count);
         std::ptr::copy_nonoverlapping(e.levels.as_ptr(), levels, spectrum_count);
+        std::ptr::copy_nonoverlapping(e.secondary_levels.as_ptr(), secondary, secondary_count);
         std::ptr::copy_nonoverlapping(e.waveform.as_ptr(), waveform, scope_count);
+        std::ptr::copy_nonoverlapping(e.waveform2.as_ptr(), waveform2, scope2_count);
     }
-    FrameCounts { spectrum_count: spectrum_count as i32, scope_count: scope_count as i32 }
+    FrameCounts { spectrum_count: spectrum_count as i32, scope_count: scope_count as i32,
+        secondary_count: secondary_count as i32, scope2_count: scope2_count as i32 }
 }
 
-/// Fixed-capacity supplementary snapshot: wave min/max L/R, stereo L/R,
-/// seven metrics (M, S, RMS L/R, true peak L/R, correlation).
+/// Fixed-capacity supplementary snapshot: 1024 waveform columns of WAVE_STRIDE,
+/// stereo L/R pairs, METRIC_COUNT metrics. True peak maxima restart after each read.
 /// All buffers must have the documented capacities and be disjoint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ag_read_meters(engine: *mut Engine, wave: *mut f32, stereo: *mut f32,
@@ -191,13 +299,14 @@ pub unsafe extern "C" fn ag_read_meters(engine: *mut Engine, wave: *mut f32, ste
     let e = unsafe { &mut *engine };
     unsafe {
         for (i, column) in e.history_columns.iter().enumerate() {
-            std::ptr::copy_nonoverlapping(column.as_ptr(), wave.add(i * 4), 4);
+            std::ptr::copy_nonoverlapping(column.as_ptr(), wave.add(i * WAVE_STRIDE), WAVE_STRIDE);
         }
         std::ptr::copy_nonoverlapping(e.stereo_points.as_ptr(), stereo, e.stereo_points.len());
-        std::ptr::copy_nonoverlapping(e.metrics.as_ptr(), metrics, 7);
+        std::ptr::copy_nonoverlapping(e.metrics.as_ptr(), metrics, METRIC_COUNT);
         *counts = e.history_columns.len() as i32;
         *counts.add(1) = (e.stereo_points.len() / 2) as i32;
     }
+    e.metrics[TRUE_PEAK_MAX..].fill(-120.0);
 }
 
 /// Five floats: sample rate, scope duration, locked cycle Hz (0 = unlocked),
@@ -283,14 +392,17 @@ mod bridge_tests {
         let mut frequencies = vec![0.0; 8193];
         let mut levels = vec![0.0; 8193];
         let mut scope = vec![0.0; 48000];
-        let mut counts = FrameCounts { spectrum_count: 0, scope_count: 0 };
+        let mut secondary = vec![0.0; 8193];
+        let mut scope2 = vec![0.0; 48000];
+        let mut counts = FrameCounts { spectrum_count: 0, scope_count: 0, secondary_count: 0, scope2_count: 0 };
         for block in 0..20 {
             feed(engine, block);
             counts = unsafe { ag_process(engine, 0.0, frequencies.as_mut_ptr(), levels.as_mut_ptr(),
-                8193, scope.as_mut_ptr(), 48000) };
+                secondary.as_mut_ptr(), 8193, scope.as_mut_ptr(), scope2.as_mut_ptr(), 48000) };
         }
         assert_eq!(counts.spectrum_count, 8193);
         assert!(counts.scope_count > 2 && counts.scope_count < 48000);
+        assert_eq!((counts.secondary_count, counts.scope2_count), (0, 0));
         assert!(frequencies.iter().chain(&levels).all(|v| v.is_finite()));
         assert!(scope[..counts.scope_count as usize].iter().all(|v| v.is_finite()));
         let peak = levels.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
@@ -303,19 +415,24 @@ mod bridge_tests {
     fn all_meter_snapshots_follow_pcm_and_respect_capacities() {
         let engine = ag_create();
         for block in 0..120 { feed(engine, block); }
-        let mut wave = vec![12345.0; 4097];
+        let mut wave = vec![12345.0; 1024 * WAVE_STRIDE + 1];
         let mut stereo = vec![12345.0; 4001];
-        let mut metrics = [12345.0; 8];
+        let mut metrics = [12345.0; METRIC_COUNT + 1];
         let mut counts = [0, 0, 12345];
         unsafe { ag_read_meters(engine, wave.as_mut_ptr(), stereo.as_mut_ptr(), metrics.as_mut_ptr(), counts.as_mut_ptr()); }
         assert!((799..=800).contains(&counts[0]));
         assert!((1..=2000).contains(&counts[1]));
         assert!(metrics[..6].iter().all(|v| v.is_finite() && *v > -60.0 && *v < 0.0));
         assert!((metrics[6] - 1.0).abs() < 0.001);
-        assert!(wave[..counts[0] as usize * 4].chunks_exact(4).all(|v| v[0] <= v[1] && v[2] <= v[3]));
-        assert_eq!(wave[4096], 12345.0);
+        assert!(metrics[10..14].iter().all(|v| v.is_finite() && *v > -60.0 && *v < 0.0));
+        assert!(wave[..counts[0] as usize * WAVE_STRIDE].chunks_exact(WAVE_STRIDE)
+            .all(|v| v[0] <= v[1] && v[2] <= v[3] && v[4] == 0.0 && v[5] == 0.0));
+        assert_eq!(wave[1024 * WAVE_STRIDE], 12345.0);
         assert_eq!(stereo[4000], 12345.0);
-        assert_eq!(metrics[7], 12345.0);
+        assert_eq!(metrics[METRIC_COUNT], 12345.0);
+        // Peak maxima restart after a read.
+        unsafe { ag_read_meters(engine, wave.as_mut_ptr(), stereo.as_mut_ptr(), metrics.as_mut_ptr(), counts.as_mut_ptr()); }
+        assert_eq!(&metrics[12..14], &[-120.0, -120.0]);
         assert_eq!(counts[2], 12345);
         unsafe { ag_destroy(engine); }
     }
@@ -422,20 +539,46 @@ mod bridge_tests {
     }
 
     #[test]
+    fn options_add_secondary_traces_channels_rms_and_band_correlation() {
+        let engine = ag_create();
+        unsafe { ag_configure_options(engine, &MeterOptions { spectrum_secondary: 2, scope_channel: 3, scope_channel2: 2,
+            scope_duration_ms: 20, waveform_channel1: 1, waveform_channel2: 2, waveform_rms: 1, stereo_bands: 1,
+            ..MeterOptions::default() }); }
+        for block in 0..120 { feed(engine, block); }
+        let e = unsafe { &*engine };
+        // feed() is mono: Side is silent in the secondary spectrum and second scope trace.
+        assert_eq!(e.secondary_levels.len(), e.levels.len());
+        assert!(e.secondary_levels.iter().all(|v| *v <= -100.0));
+        assert!(!e.waveform2.is_empty() && e.waveform2.iter().all(|v| v.abs() < 1e-6));
+        assert!(e.waveform.iter().any(|v| v.abs() > 0.2));
+        let newest = e.history_columns.back().unwrap();
+        // Mid of a 0.25 sine: RMS ≈ 0.177; Side is silent.
+        assert!(newest[1] > 0.2 && (newest[4] - 0.177).abs() < 0.03, "{newest:?}");
+        assert_eq!((newest[2], newest[3], newest[5]), (0.0, 0.0, 0.0));
+        assert!(e.metrics[6..10].iter().all(|v| (v - 1.0).abs() < 0.01), "{:?}", &e.metrics[6..10]);
+        unsafe { ag_destroy(engine); }
+    }
+
+    #[test]
     fn bridge_respects_small_output_capacities() {
         let engine = ag_create();
         let mut frequencies = [12345.0; 8];
         let mut levels = [12345.0; 8];
         let mut scope = [12345.0; 8];
+        let mut secondary = [12345.0; 8];
+        let mut scope2 = [12345.0; 8];
+        unsafe { ag_configure_options(engine, &MeterOptions { spectrum_secondary: 2, scope_channel2: 3, ..MeterOptions::default() }); }
         for block in 0..20 {
             feed(engine, block);
             let counts = unsafe { ag_process(engine, 0.65, frequencies.as_mut_ptr(), levels.as_mut_ptr(),
-                5, scope.as_mut_ptr(), 5) };
+                secondary.as_mut_ptr(), 5, scope.as_mut_ptr(), scope2.as_mut_ptr(), 5) };
             assert!(counts.spectrum_count <= 5 && counts.scope_count <= 5);
         }
         assert_eq!(&frequencies[5..], &[12345.0; 3]);
         assert_eq!(&levels[5..], &[12345.0; 3]);
         assert_eq!(&scope[5..], &[12345.0; 3]);
+        assert_eq!(&secondary[5..], &[12345.0; 3]);
+        assert_eq!(&scope2[5..], &[12345.0; 3]);
         unsafe { ag_destroy(engine); }
     }
 }
