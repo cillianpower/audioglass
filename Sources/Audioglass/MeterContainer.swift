@@ -46,24 +46,26 @@ final class MeterContainer: NSView {
         scroll.isHidden = count == 0
         guard count > 0 else { meters.spectrogramView.isHidden = true; return }
         let viewport = scroll.contentSize
-        let columns: Int
-        if meters.arrangement == 1 { columns = count }
-        else if meters.arrangement == 2 { columns = 1 }
+        let horizontal: Bool
+        if meters.arrangement == 1 { horizontal = true }
+        else if meters.arrangement == 2 { horizontal = false }
         else {
             let ratio = viewport.width / max(1, viewport.height)
             if automaticHorizontal == nil { automaticHorizontal = ratio >= 1 }
             else if ratio >= 1.1 { automaticHorizontal = true }
             else if ratio <= 0.9 { automaticHorizontal = false }
-            columns = automaticHorizontal == true ? count : 1
+            horizontal = automaticHorizontal == true
         }
-        if meters.layoutColumns != columns {
+        let columns = horizontal ? count : 1
+        if meters.layoutColumns != columns || meters.layoutHorizontal != horizontal {
             meters.cancelInteraction()
             scroll.contentView.scroll(to: .zero)
         }
         meters.layoutColumns = columns
+        meters.layoutHorizontal = horizontal
         let rows = (count + columns - 1) / columns
         meters.setFrameSize(NSSize(width: max(viewport.width, CGFloat(columns) * 150 + CGFloat(columns - 1) * 8 + 16),
-            height: max(viewport.height, CGFloat(rows) * 110 + CGFloat(rows - 1) * 8 + 14)))
+            height: max(viewport.height, CGFloat(rows) * 110 + CGFloat(rows - 1) * 8 + (horizontal ? 6 : 14))))
         scroll.reflectScrolledClipView(scroll.contentView)
         meters.needsDisplay = true
         summary.needsDisplay = true
