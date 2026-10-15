@@ -10,6 +10,7 @@ The interface adapts its meter layout to the window shape and includes cursor re
 - Open **Audioglass → Settings…** or press **⌘,** to toggle modules, reorder the interactive meters, and configure FFT smoothing and analysis. At least one stays visible. **Reset Section Sizes** restores equal sizing.
 - Choose **60 or 120 fps** in **Settings → Frame Rate**. The display-synchronized rate is saved, defaults to 120 fps, and is limited by your display’s refresh rate.
 - In Settings, independently toggle **Oscilloscope / Waveform / Stereometer Normalization** (on by default). Quiet audio expands to fit the view; level readouts and correlation use the original audio.
+- **View → Spectrogram** (also in Settings) switches between sharpened time-frequency reassignment and classic FFT, and sets FFT size, hop (scroll speed), window, zero padding, frequency scale, floor, spectral tilt, orientation (scroll or waterfall) and palette. History scrolls at one column per point.
 - Click and hold the **Spectrum** to freeze its trace and cursor readings; release to resume. Other meters continue updating.
 - In horizontal mode, graph names and normalization/hold status appear in the hover readout, leaving more height for the plots. Vertical mode keeps its headings.
 - Loudness and audio information stay in the left column; interactive meters use the full height to its right. Drag the slim **top bar** to move the window.

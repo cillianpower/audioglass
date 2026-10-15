@@ -111,8 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let frame = pendingFrame {
             pendingFrame = nil
             meters.frameData = frame
-            meters.spectrogramView.update(frame.spectrogram)
         }
+        meters.spectrogramView.drawIfNeeded()
         meters.advanceNormalization(at: link.targetTimestamp)
         meters.needsDisplay = true
         tick()
@@ -128,14 +128,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         analysisInFlight = true
         let smoothing = smoothing
         let settings = settings
+        let geometry = meters.spectrogramGeometry
         let engine = engine
         let generation = sourceGeneration
         let input = capture.transport.map { CaptureInput(transport: $0, sampleRate: Float(capture.format.mSampleRate)) }
         analysisQueue.async { [weak self] in
-            let frame = engine.process(input: input, settings: settings, smoothing: smoothing)
+            var frame = engine.process(input: input, settings: settings, geometry: geometry, smoothing: smoothing)
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.sourceGeneration == generation else { return }
+                // Spectrogram deltas apply even if this frame is never presented.
+                self.meters.spectrogramView.apply(frame.spectrogram)
+                frame.spectrogram = nil
                 self.pendingFrame = frame
                 self.analysisInFlight = false
             }
@@ -159,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceGeneration += 1
         lastReceived = 0
         analysisQueue.sync { engine.reset() }
+        meters.spectrogramView.clear()
         analysisInFlight = false
         source = selected
         do {
@@ -269,6 +274,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addSettingMenu(to: viewMenu, title: "Spectrum Weighting", key: "AWeighting", values: [("Unweighted", 0), ("A-weighted", 1)], selected: settings.weighted ? 1 : 0)
         addSettingMenu(to: viewMenu, title: "Oscilloscope Trigger", key: "ScopeCycles", values: [("Zero Crossing — 50 ms", 0), ("Stable — 1 Cycle", 1), ("Stable — 2 Cycles", 2), ("Stable — 4 Cycles", 4)], selected: settings.cycles)
         addSettingMenu(to: viewMenu, title: "Waveform History", key: "WaveSpeed", values: [("2.56 Seconds", 400), ("5.12 Seconds", 200), ("10.24 Seconds", 100)], selected: settings.waveSpeed)
+        let spectrogramMenu = NSMenu(title: "Spectrogram")
+        addSettingMenu(to: spectrogramMenu, title: "Reassignment", key: "SpectrogramReassign", values: [("On — Sharpened", 1), ("Off — Classic FFT", 0)], selected: settings.spectrogramReassign)
+        addSettingMenu(to: spectrogramMenu, title: "FFT Size", key: "SpectrogramFFT", values: [1024, 2048, 4096, 8192, 16384].map { ("\($0)", $0) }, selected: settings.spectrogramFFT)
+        addSettingMenu(to: spectrogramMenu, title: "Hop (Scroll Speed)", key: "SpectrogramHop", values: [4, 6, 8, 16, 32, 64, 128].map { ("FFT ÷ \($0)\($0 == 4 ? " — Slowest" : $0 == 128 ? " — Fastest" : "")", $0) }, selected: settings.spectrogramHop)
+        addSettingMenu(to: spectrogramMenu, title: "Window", key: "SpectrogramWindow", values: [("Rectangular", 0), ("Hann", 1), ("Hamming", 2), ("Blackman", 3), ("Blackman-Harris", 4)], selected: settings.spectrogramWindow)
+        addSettingMenu(to: spectrogramMenu, title: "Zero Padding", key: "SpectrogramZeroPad", values: [("Off", 1), ("2×", 2), ("4×", 4), ("8×", 8)], selected: settings.spectrogramZeroPad)
+        addSettingMenu(to: spectrogramMenu, title: "Frequency Scale", key: "SpectrogramScale", values: [("Linear", 0), ("Logarithmic", 1), ("ERB", 2)], selected: settings.spectrogramScale)
+        addSettingMenu(to: spectrogramMenu, title: "Floor", key: "SpectrogramFloor", values: [-60, -80, -100, -120, -140].map { ("−\(-$0) dB", $0) }, selected: settings.spectrogramFloor)
+        addSettingMenu(to: spectrogramMenu, title: "Spectral Tilt", key: "SpectrogramTilt", values: [("−3 dB/oct", -30), ("Off", 0), ("+1.5 dB/oct", 15), ("+3 dB/oct", 30), ("+4.5 dB/oct", 45), ("+6 dB/oct", 60)], selected: settings.spectrogramTilt)
+        addSettingMenu(to: spectrogramMenu, title: "Orientation", key: "SpectrogramOrientation", values: [("Scroll Left", 0), ("Waterfall Down", 1), ("Waterfall Up", 2)], selected: settings.spectrogramOrientation)
+        addSettingMenu(to: spectrogramMenu, title: "Palette", key: "SpectrogramPalette", values: [("Glass", 0), ("Heat", 1)], selected: settings.spectrogramPalette)
+        let spectrogramItem = NSMenuItem(title: "Spectrogram", action: nil, keyEquivalent: "")
+        spectrogramItem.submenu = spectrogramMenu
+        viewMenu.addItem(spectrogramItem)
         addSettingMenu(to: viewMenu, title: "Oscilloscope Normalization", key: "NormalizeScope", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeScope ? 1 : 0)
         addSettingMenu(to: viewMenu, title: "Waveform Normalization", key: "NormalizeWaveform", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeWaveform ? 1 : 0)
         addSettingMenu(to: viewMenu, title: "Stereometer Normalization", key: "NormalizeStereo", values: [("Off — Actual Amplitude", 0), ("On — Fit to View", 1)], selected: settings.normalizeStereo ? 1 : 0)
@@ -410,6 +429,8 @@ final class MeterView: NSView {
         return saved.isEmpty ? Array(0..<6) : Array(Set(saved)).sorted()
     }()
     let spectrogramView = SpectrogramView()
+    /// Updated when the spectrogram panel is drawn; read by the analysis tick.
+    private(set) var spectrogramGeometry = SpectrogramGeometry()
     var layoutColumns = 6
     var layoutHorizontal = true
     var arrangement = UserDefaults.standard.integer(forKey: "StripLayoutMode")
@@ -643,7 +664,7 @@ final class MeterView: NSView {
                 switch meter {
                 case 0: spectrum(in: graph)
                 case 1: scope(in: graph)
-                case 2: spectrogramView.frame = graph
+                case 2: spectrogram(in: graph)
                 case 3: history(in: graph)
                 case 4: stereo(in: graph)
                 default: loudness(in: graph)
@@ -745,6 +766,21 @@ final class MeterView: NSView {
         path.lineWidth = 1
         path.lineJoinStyle = .miter
         path.stroke()
+    }
+
+    private func spectrogram(in rect: NSRect) {
+        spectrogramView.frame = rect
+        let scale = window?.backingScaleFactor ?? 2
+        let scrollsLeft = settings.spectrogramOrientation == 0
+        let time = scrollsLeft ? rect.width : rect.height
+        let frequency = scrollsLeft ? rect.height : rect.width
+        // One column per point, as upstream; rows are physical pixels.
+        spectrogramGeometry = SpectrogramGeometry(columns: max(16, min(4096, Int(time.rounded()))),
+            rows: max(16, min(2048, Int((frequency * scale).rounded()))), rowSpan: max(1, Int(scale.rounded())))
+        spectrogramView.style = SpectrogramStyle(floor: Float(settings.spectrogramFloor),
+            tilt: Float(settings.spectrogramTilt) / 10, scale: settings.spectrogramScale,
+            orientation: settings.spectrogramOrientation, palette: settings.spectrogramPalette,
+            sampleRate: frameData.timing[0])
     }
 
     private func history(in rect: NSRect) {
@@ -863,13 +899,17 @@ final class MeterView: NSView {
                     y: rect.midY - CGFloat(sample) * scopeGain * rect.height * 0.5)
             } else { lines = ["Waiting for oscilloscope"] }
         case 2:
-            let column = min(511, Int(x * 512))
-            let row = min(191, Int(y * 192))
-            let hz = sinh(Double(191 - row) / 191 * asinh(rate / 2 / 20)) * 20
-            lines = [frequencyLabel(hz), String(format: "%.3f s ago · MID", Double(511 - column) * Double(timing[3]))]
-            if column >= 512 - Int(timing[4]), frameData.spectrogram.count == 512 * 192 {
-                let pixel = frameData.spectrogram[row * 512 + column]
-                lines.append(pixel == 0 ? "≤ −100 dBFS" : String(format: "≈ %.1f dBFS · row peak", Double(pixel) / 255 * 100 - 100))
+            // Matches the shader: time 0 oldest .. 1 newest, frequency 0 lowest .. 1 highest.
+            let (time, frequency): (CGFloat, CGFloat) = switch settings.spectrogramOrientation {
+            case 1: (1 - y, x)
+            case 2: (y, x)
+            default: (x, 1 - y)
+            }
+            let sample = spectrogramView.sample(time: time, frequency: frequency)
+            lines = [frequencyLabel(sample.hz), String(format: "%.3f s ago · MID", Double(sample.age) * Double(timing[3]))]
+            if let db = sample.db {
+                let kind = settings.spectrogramReassign == 1 ? "reassigned pixel" : "FFT bin"
+                lines.append(db <= -139.99 ? "≤ −140 dBFS" : String(format: "%.1f dBFS · %@", db, kind))
             } else { lines.append("No history here yet") }
         case 3:
             let count = frameData.history.count / 4
