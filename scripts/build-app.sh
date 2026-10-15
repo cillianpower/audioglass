@@ -16,15 +16,20 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>Audioglass</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleShortVersionString</key><string>0.2.1</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSMicrophoneUsageDescription</key><string>Audioglass analyzes your selected microphone or audio interface input to display live meters.</string>
 <key>NSAudioCaptureUsageDescription</key><string>Audioglass analyzes audio playing on your Mac to display live audio meters.</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>CFBundleIconName</key><string>Audioglass</string>
+<key>CFBundleIconFile</key><string>Audioglass</string>
 </dict></plist>
 PLIST
 mkdir -p "$app_dir/Contents/Resources"
+xcrun actool "$PWD/Icon/Audioglass.icon" --compile "$app_dir/Contents/Resources" --platform macosx \
+  --minimum-deployment-target 26.0 --app-icon Audioglass \
+  --output-partial-info-plist "$PWD/build/icon-partial.plist" >/dev/null
 cp LICENSE "$app_dir/Contents/Resources/LICENSE.txt"
 cp Rust/UPSTREAM.md "$app_dir/Contents/Resources/OpenMeters.md"
 codesign --force --sign - "$app_dir"
