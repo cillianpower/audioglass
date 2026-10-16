@@ -2,3 +2,4 @@
 build/
 Rust/target/
 .DS_Store
+notes/
