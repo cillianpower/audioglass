@@ -8,8 +8,6 @@
 
 Audioglass listens to everything your Mac plays, or to a single app such as your DAW, and draws six live meters: Spectrum, Oscilloscope, Spectrogram, Waveform, Stereometer, and Loudness. The analysis comes from [OpenMeters](https://github.com/httpsworldview/openmeters); the window, controls, and rendering are native AppKit and Metal.
 
-Everything runs on your Mac. Audioglass never records, stores, or sends audio anywhere.
-
 ## Install
 
 Requires macOS 26 or later on Apple silicon.
