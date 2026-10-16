@@ -365,8 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout(_ sender: NSMenuItem) {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Audioglass",
-            .applicationVersion: "0.2.0",
-            .credits: NSAttributedString(string: "Native macOS glass audio meters.\nDSP adapted from OpenMeters 1.15.2 by Maika Namuo.\nGPL-3.0-or-later; source attribution and license are included in the app bundle.")
+            .credits: NSAttributedString(string: "Native macOS glass audio meters.\nDSP adapted from OpenMeters 1.15.2 by Maika Namuo.\nGPL-3.0-or-later; source attribution and license are included in the app bundle.\nSource: https://github.com/cillianpower/audioglass")
         ])
     }
 
