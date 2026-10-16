@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenAllowsTiling]
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.setFrameAutosaveName("AudioglassWindowStudy")
+        window.setFrameAutosaveName("AudioglassWindow")
 
         let glass = NSGlassEffectView()
         glass.style = .regular
@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         meterContainer = MeterContainer(meters: meters)
         glass.contentView = meterContainer
         window.contentView = glass
-        if !window.setFrameUsingName("AudioglassWindowStudy") { window.center() }
+        if !window.setFrameUsingName("AudioglassWindow") { window.center() }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         displayLink = window.displayLink(target: self, selector: #selector(displayTick(_:)))
