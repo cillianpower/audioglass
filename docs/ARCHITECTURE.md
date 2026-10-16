@@ -25,6 +25,10 @@ Sources/Audioglass/            AppKit plots, Metal spectrogram, menus and settin
 
 Each display tick takes the most recent snapshot. Only one analysis job can be in flight at a time, so a slow frame drops work instead of queueing it.
 
+## Layout
+
+`MeterContainer.swift` decides between a wide strip and a tall column. It uses the window's shape when the layout is Automatic. In a strip, the source and loudness readings sit in a fixed left sidebar, and the meters fill the remaining width and never scroll vertically. In a column, the readings form a block across the top beside the traffic lights, and the stacked meters scroll only when the window is too short for them. Shift-drag sizes are stored per orientation.
+
 ## Rendering
 
 Plots are drawn in AppKit as thin white line segments over `NSGlassEffectView`. `PixelTrace.swift` reduces dense traces to min/max per physical pixel column so path size stays bounded at 120 fps. `NSWindow.displayLink` drives redraws at the selected frame rate. While the window is hidden, a 30 Hz timer keeps capture and history current.
