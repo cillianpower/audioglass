@@ -1,5 +1,3 @@
-<p align="center"><img src="docs/images/icon.png" width="128" height="128" alt=""></p>
-
 <h1 align="center">Audioglass</h1>
 
 <p align="center">Audio meters for macOS, on glass.</p>
