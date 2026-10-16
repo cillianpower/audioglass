@@ -87,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let received = ag_transport_received(ring)
                     let progressing = received > self.lastReceived
                     self.lastReceived = received
-                    self.meters.sourceLabel = "\(self.source.name.uppercased()) · \(Int(self.capture.format.mSampleRate)) Hz · \(progressing ? "CAPTURING" : "WAITING FOR STREAM")"
+                    self.meters.sourceLabel = "\(self.source.name.uppercased()) · \(String(format: "%g", self.capture.format.mSampleRate / 1000)) kHz" + (progressing ? "" : " · WAITING FOR STREAM")
                 }
             }
         }
@@ -1045,39 +1045,71 @@ final class MeterView: NSView {
         NSRect(x: marker - 1, y: bar.minY - 3, width: 2, height: 7).fill()
     }
 
-    var loudnessHeading: String {
-        "LOUDNESS" + (settings.loudnessRMS == 1 ? " · SLOW RMS" : "") + (settings.loudnessPeakHold != 0 ? " · HOLD" : "")
-    }
+    /// Smallest height that shows every loudness line.
+    var loudnessMinimumHeight: CGFloat { 4 * 17 + 14 + (settings.loudnessPeakHold != 0 ? 14 : 0) }
 
-    func loudness(in rect: NSRect) {
-        guard frameData.metrics.count == AnalysisFrame.metricCount else { return }
+    private var loudnessRows: [(label: String, value: Float, unit: String)] {
         let metrics = frameData.metrics
         let rms = settings.loudnessRMS == 1 ? (metrics[10], metrics[11]) : (metrics[2], metrics[3])
-        let lineHeight = min(24, max(17, rect.height / 6))
-        for (index, pair) in [("M", metrics[0]), ("S", metrics[1]), ("RMS L", rms.0), ("RMS R", rms.1)].enumerated() {
-            let y = rect.minY + CGFloat(index) * lineHeight
-            let value = pair.1.isFinite && pair.1 > -99.8 ? String(format: "%.1f", pair.1) : "−∞"
-            text("\(pair.0)  \(value) \(index < 2 ? "LUFS" : "dBFS")", at: NSPoint(x: rect.minX + 2, y: y), size: 10, color: .white.withAlphaComponent(0.85))
-            let bar = NSRect(x: rect.minX + 2, y: y + 14, width: rect.width * CGFloat(max(0, min(1, (pair.1 + 60) / 60))), height: 2)
-            NSColor.white.withAlphaComponent(0.55).setFill()
-            bar.fill()
-        }
+        return [("M", metrics[0], "LUFS"), ("S", metrics[1], "LUFS"), ("RMS L", rms.0, "dBFS"), ("RMS R", rms.1, "dBFS")]
+    }
+
+    private var peakLines: [(String, CGFloat)] {
         let peak = { (value: Float) in value > -99.8 ? String(format: "%.1f", value) : "−∞" }
-        var y = rect.minY + lineHeight * 4
-        if rect.height > 75 {
-            text("TP \(peak(metrics[4])) / \(peak(metrics[5])) dBTP", at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.6))
-            y += 14
+        let metrics = frameData.metrics
+        var lines = [("TP \(peak(metrics[4])) / \(peak(metrics[5])) dBTP", CGFloat(0.6))]
+        if settings.loudnessPeakHold != 0 { lines.append(("MAX \(peak(heldPeaks[0])) / \(peak(heldPeaks[1])) dBTP", 0.85)) }
+        return lines
+    }
+
+    /// One reading with a bar beneath; the track spans −60 to 0 dB so headroom reads as scale.
+    private func loudnessRow(_ row: (label: String, value: Float, unit: String), at point: NSPoint, width: CGFloat) {
+        let value = row.value.isFinite && row.value > -99.8 ? String(format: "%.1f", row.value) : "−∞"
+        text("\(row.label)  \(value) \(row.unit)", at: point, size: 10, color: .white.withAlphaComponent(0.85), width: width)
+        let track = NSRect(x: point.x, y: point.y + 14, width: width, height: 2)
+        NSColor.white.withAlphaComponent(0.12).setFill()
+        track.fill()
+        NSColor.white.withAlphaComponent(0.55).setFill()
+        NSRect(x: track.minX, y: track.minY, width: track.width * CGFloat(max(0, min(1, (row.value + 60) / 60))), height: 2).fill()
+    }
+
+    /// Stacked readings for the vertical layout's left column.
+    func loudness(in rect: NSRect) {
+        guard frameData.metrics.count == AnalysisFrame.metricCount else { return }
+        let lineHeight = min(24, max(17, (rect.height - 28) / 4))
+        for (index, row) in loudnessRows.enumerated() {
+            loudnessRow(row, at: NSPoint(x: rect.minX + 2, y: rect.minY + CGFloat(index) * lineHeight), width: rect.width - 2)
         }
-        if settings.loudnessPeakHold != 0 && rect.height > 90 {
-            text("MAX \(peak(heldPeaks[0])) / \(peak(heldPeaks[1])) dBTP", at: NSPoint(x: rect.minX + 2, y: y), size: 9, color: .white.withAlphaComponent(0.85))
-            y += 14
+        for (index, line) in peakLines.enumerated() {
+            text(line.0, at: NSPoint(x: rect.minX + 2, y: rect.minY + lineHeight * 4 + CGFloat(index) * 14), size: 9, color: .white.withAlphaComponent(line.1))
         }
-        if clipActive {
-            let badge = NSRect(x: rect.minX + 2, y: y + 2, width: 34, height: 13)
-            NSColor.white.withAlphaComponent(0.9).setFill()
-            NSBezierPath(roundedRect: badge, xRadius: 3, yRadius: 3).fill()
-            text("CLIP", at: NSPoint(x: badge.minX + 4, y: badge.minY), size: 9, color: .black.withAlphaComponent(0.85))
+    }
+
+    static func loudnessGridHeight(columns: Int) -> CGFloat { CGFloat(4 / columns) * 20 + 13 }
+
+    /// Readings in a grid for the vertical layout's top block, with peaks on one line beneath.
+    func loudnessGrid(in rect: NSRect, columns: Int) {
+        guard frameData.metrics.count == AnalysisFrame.metricCount else { return }
+        let cell = rect.width / CGFloat(columns)
+        for (index, row) in loudnessRows.enumerated() {
+            loudnessRow(row, at: NSPoint(x: rect.minX + CGFloat(index % columns) * cell, y: rect.minY + CGFloat(index / columns) * 20),
+                        width: max(0, cell - 16))
         }
+        var x = rect.minX
+        for line in peakLines {
+            text(line.0, at: NSPoint(x: x, y: rect.minY + CGFloat(4 / columns) * 20), size: 9, color: .white.withAlphaComponent(line.1))
+            x += textWidth(line.0, size: 9) + 16
+        }
+    }
+
+    func textWidth(_ value: String, size: CGFloat) -> CGFloat {
+        (value as NSString).size(withAttributes: [.font: NSFont(name: "Menlo", size: size) ?? NSFont.systemFont(ofSize: size)]).width
+    }
+
+    func clipBadge(in badge: NSRect) {
+        NSColor.white.withAlphaComponent(0.9).setFill()
+        NSBezierPath(roundedRect: badge, xRadius: 3, yRadius: 3).fill()
+        text("CLIP", at: NSPoint(x: badge.minX + 4, y: badge.minY), size: 9, color: .black.withAlphaComponent(0.85))
     }
 
     private func frequencyLabel(_ hz: Double) -> String {
